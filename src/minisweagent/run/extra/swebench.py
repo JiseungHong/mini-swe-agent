@@ -24,6 +24,7 @@ from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments import get_environment
 from minisweagent.models import get_model
 from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
+from minisweagent.run.extra.utils.swebench_pro_utils import get_swebench_pro_docker_image
 from minisweagent.run.utils.save import save_traj
 from minisweagent.utils.log import add_file_handler, logger
 
@@ -70,10 +71,15 @@ def get_swebench_docker_image_name(instance: dict) -> str:
     """Get the image name for a SWEBench instance."""
     image_name = instance.get("image_name", None)
     if image_name is None:
-        # Docker doesn't allow double underscore, so we replace them with a magic token
-        iid = instance["instance_id"]
-        id_docker_compatible = iid.replace("__", "_1776_")
-        image_name = f"docker.io/swebench/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
+        # Check if this is a SWE-bench_Pro instance (has 'repo' field)
+        # SWE-bench_Pro instances use a different Docker image naming scheme
+        if "repo" in instance:
+            image_name = get_swebench_pro_docker_image(instance)
+        else:
+            # Docker doesn't allow double underscore, so we replace them with a magic token
+            iid = instance["instance_id"]
+            id_docker_compatible = iid.replace("__", "_1776_")
+            image_name = f"docker.io/swebench/sweb.eval.x86_64.{id_docker_compatible}:latest".lower()
     return image_name
 
 
