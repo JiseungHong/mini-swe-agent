@@ -51,6 +51,20 @@ WORKERS=32 bash scripts/run.sh
 WORKERS=16 bash scripts/run.sh
 ```
 
+## Resuming After Failure
+
+If the script fails, you can resume:
+
+```bash
+# Skip venv setup (if already done)
+SKIP_SETUP=1 bash scripts/run.sh
+
+# Skip venv + vLLM check (if vLLM already running)
+SKIP_SETUP=1 SKIP_VLLM=1 bash scripts/run.sh
+```
+
+The evaluation **automatically skips completed instances** - just re-run the script.
+
 ## Configuration Details
 
 ### Model Configuration (`configs/qwen2.5_coder_7b.yaml`)

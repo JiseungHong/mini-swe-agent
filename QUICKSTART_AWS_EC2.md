@@ -127,6 +127,20 @@ WORKERS=8 bash scripts/run.sh
 WORKERS=10 bash scripts/run.sh
 ```
 
+## Resuming After Failure
+
+If the script fails, resume with:
+
+```bash
+# Skip venv setup (faster)
+SKIP_SETUP=1 bash scripts/run.sh
+
+# Skip venv + vLLM (if both already done)
+SKIP_SETUP=1 SKIP_VLLM=1 bash scripts/run.sh
+```
+
+Completed instances are automatically skipped on re-run.
+
 ## Monitoring
 
 ### Check GPU Usage
