@@ -349,7 +349,19 @@ def run_evaluation(
     # Track overall statistics
     all_results = []
     completed_instances = 0
-    cost_summary = []  # Simple cost tracking per instance
+
+    # Load existing cost summary to accumulate across runs
+    cost_summary_file = output_path / "cost_summary.json"
+    cost_summary_dict = {}  # Dict for easy lookup and update
+    if cost_summary_file.exists():
+        try:
+            existing_summary = json.load(open(cost_summary_file))
+            # Convert list to dict for easy merging
+            for item in existing_summary.get("instances", []):
+                cost_summary_dict[item["instance_id"]] = item
+            console.print(f"[cyan]Loaded existing cost summary with {len(cost_summary_dict)} instances[/cyan]")
+        except Exception as e:
+            logger.warning(f"Could not load existing cost summary: {e}")
 
     # Process instances sequentially
     for idx, (instance, start_run_id) in enumerate(instances_with_runs, 1):
@@ -376,22 +388,31 @@ def run_evaluation(
         all_results.extend(instance_results)
         completed_instances += 1
 
-        # Add to cost summary
+        # Update cost summary (accumulate across runs)
+        instance_id = instance["instance_id"]
         instance_total_cost = sum(r["cost"] for r in instance_results)
-        cost_summary.append({
-            "instance_id": instance["instance_id"],
-            "total_cost": round(instance_total_cost, 6),
-            "num_runs_completed": len(instance_results),
+
+        # Get existing entry or create new one
+        existing_entry = cost_summary_dict.get(instance_id, {
+            "instance_id": instance_id,
+            "total_cost": 0.0,
+            "num_runs_completed": 0,
         })
 
+        # Accumulate costs and run counts
+        existing_entry["total_cost"] = round(existing_entry["total_cost"] + instance_total_cost, 6)
+        existing_entry["num_runs_completed"] = existing_entry["num_runs_completed"] + len(instance_results)
+
+        # Update dict
+        cost_summary_dict[instance_id] = existing_entry
+
         # Save cost summary after each instance
-        cost_summary_file = output_path / "cost_summary.json"
         with open(cost_summary_file, 'w') as f:
             json.dump({
                 "total_cost": round(cost_tracker.get_total_cost(), 6),
                 "cost_limit": cost_limit,
-                "completed_instances": completed_instances,
-                "instances": cost_summary,
+                "completed_instances": len(cost_summary_dict),
+                "instances": list(cost_summary_dict.values()),  # Convert dict back to list
             }, f, indent=2)
 
         # Save progress after each instance
