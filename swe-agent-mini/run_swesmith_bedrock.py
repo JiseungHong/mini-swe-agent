@@ -6,14 +6,17 @@ Features:
 - Cost tracking with configurable limit
 - N inferences per instance (parallel per instance, sequential across instances)
 - Proper trajectory saving with naming {instance_id}_{n}
+- Automatic Docker image cleanup after all instances from a repo are processed
 """
 
 import concurrent.futures
 import json
+import subprocess
 import sys
 import threading
 import time
 import traceback
+from collections import defaultdict
 from pathlib import Path
 
 import yaml
@@ -70,6 +73,59 @@ class CostTracker:
         """Check if still under cost limit."""
         with self.lock:
             return self.total_cost < self.cost_limit
+
+
+class DockerImageManager:
+    """Manages Docker image lifecycle - tracks usage and cleans up when done."""
+
+    def __init__(self):
+        self.image_ref_count = defaultdict(int)  # image_name -> count of instances using it
+        self.lock = threading.Lock()
+
+    def register_instances(self, instances: list[dict]):
+        """Register instances and track how many use each image."""
+        for instance in instances:
+            image_name = instance.get("image_name")
+            if image_name:
+                with self.lock:
+                    self.image_ref_count[image_name] += 1
+
+        logger.info(f"Registered {len(self.image_ref_count)} unique Docker images for cleanup")
+
+    def mark_instance_complete(self, instance: dict) -> bool:
+        """Mark an instance as complete. Returns True if image should be cleaned up."""
+        image_name = instance.get("image_name")
+        if not image_name:
+            return False
+
+        with self.lock:
+            if image_name in self.image_ref_count:
+                self.image_ref_count[image_name] -= 1
+                if self.image_ref_count[image_name] <= 0:
+                    # All instances using this image are done
+                    del self.image_ref_count[image_name]
+                    return True
+        return False
+
+    def cleanup_image(self, image_name: str):
+        """Remove a Docker image."""
+        try:
+            console.print(f"\n[yellow]🧹 Cleaning up Docker image: {image_name}[/yellow]")
+            result = subprocess.run(
+                ["docker", "rmi", "-f", image_name],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            if result.returncode == 0:
+                console.print(f"[green]✓ Successfully removed image: {image_name}[/green]")
+                logger.info(f"Cleaned up Docker image: {image_name}")
+            else:
+                console.print(f"[yellow]⚠ Could not remove image {image_name}: {result.stderr.strip()}[/yellow]")
+                logger.warning(f"Failed to remove Docker image {image_name}: {result.stderr}")
+        except Exception as e:
+            console.print(f"[yellow]⚠ Error cleaning up image {image_name}: {e}[/yellow]")
+            logger.warning(f"Error cleaning up Docker image {image_name}: {e}")
 
 
 def get_swebench_docker_image_name(instance: dict) -> str:
@@ -334,8 +390,13 @@ def run_evaluation(
     console.print(f"[bold]Loading agent config from '{config_path}'[/bold]")
     config = yaml.safe_load(config_path.read_text())
 
-    # Initialize cost tracker
+    # Initialize cost tracker and image manager
     cost_tracker = CostTracker(cost_limit)
+    image_manager = DockerImageManager()
+
+    # Register instances for image cleanup tracking
+    instances_to_process = [instance for instance, _ in instances_with_runs]
+    image_manager.register_instances(instances_to_process)
 
     console.print(f"\n[bold yellow]Configuration:[/bold yellow]")
     console.print(f"  - Instances to process: {len(instances_with_runs)}")
@@ -345,6 +406,7 @@ def run_evaluation(
     console.print(f"  - Cost limit: ${cost_limit:.2f}")
     console.print(f"  - Model: {config.get('model', {}).get('model_name', 'N/A')}")
     console.print(f"  - Environment: {config.get('environment', {}).get('environment_class', 'docker')}")
+    console.print(f"  - Docker cleanup: Enabled ({len(image_manager.image_ref_count)} unique images)")
 
     # Track overall statistics
     all_results = []
@@ -388,6 +450,13 @@ def run_evaluation(
         all_results.extend(instance_results)
         completed_instances += 1
 
+        # Check if we should clean up the Docker image
+        should_cleanup = image_manager.mark_instance_complete(instance)
+        if should_cleanup:
+            image_name = instance.get("image_name")
+            if image_name:
+                image_manager.cleanup_image(image_name)
+
         # Update cost summary (accumulate across runs)
         instance_id = instance["instance_id"]
         instance_total_cost = sum(r["cost"] for r in instance_results)
@@ -407,25 +476,31 @@ def run_evaluation(
         cost_summary_dict[instance_id] = existing_entry
 
         # Save cost summary after each instance
+        # Calculate cumulative total cost from all instances (not just current session)
+        cumulative_total_cost = sum(entry["total_cost"] for entry in cost_summary_dict.values())
+
         with open(cost_summary_file, 'w') as f:
             json.dump({
-                "total_cost": round(cost_tracker.get_total_cost(), 6),
+                "total_cost": round(cumulative_total_cost, 6),
                 "cost_limit": cost_limit,
                 "completed_instances": len(cost_summary_dict),
                 "instances": list(cost_summary_dict.values()),  # Convert dict back to list
             }, f, indent=2)
 
-        # Save progress after each instance
+        # Save progress after each instance (uses cumulative cost from all instances)
         progress_file = output_path / "progress.json"
         with open(progress_file, 'w') as f:
             json.dump({
                 "completed_instances": completed_instances,
                 "total_instances": len(instances),
-                "total_cost": cost_tracker.get_total_cost(),
+                "total_cost": cumulative_total_cost,
                 "cost_limit": cost_limit,
                 "n_runs": n_runs,
                 "results": all_results,
             }, f, indent=2)
+
+    # Calculate final cumulative total cost from all processed instances
+    final_cumulative_cost = sum(entry["total_cost"] for entry in cost_summary_dict.values())
 
     # Final summary
     console.print(f"\n[bold green]{'='*80}[/bold green]")
@@ -433,7 +508,8 @@ def run_evaluation(
     console.print(f"[bold green]{'='*80}[/bold green]")
     console.print(f"  - Completed instances: {completed_instances} / {len(instances)}")
     console.print(f"  - Total runs: {len(all_results)}")
-    console.print(f"  - Total cost: ${cost_tracker.get_total_cost():.6f}")
+    console.print(f"  - Total cost (cumulative): ${final_cumulative_cost:.6f}")
+    console.print(f"  - Total cost (this session): ${cost_tracker.get_total_cost():.6f}")
     console.print(f"  - Results saved to: {output_path}")
     console.print(f"\n[bold cyan]Output files:[/bold cyan]")
     console.print(f"  - cost_summary.json    # Clear cost breakdown per instance")
