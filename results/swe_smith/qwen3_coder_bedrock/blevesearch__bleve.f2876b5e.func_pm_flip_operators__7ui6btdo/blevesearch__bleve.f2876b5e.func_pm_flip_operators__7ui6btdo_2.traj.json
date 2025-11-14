@@ -1,0 +1,1519 @@
+{
+  "info": {
+    "exit_status": "Submitted",
+    "submission": "diff --git a/geo/parse.go b/geo/parse.go\nindex 7be0a06..9c93e01 100644\n--- a/geo/parse.go\n+++ b/geo/parse.go\n@@ -364,11 +364,13 @@ func ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n \t}\n \n \tif thingVal.Kind() == reflect.Map {\n+\t\tvar foundRadius, foundCoordinates bool\n \t\titer := thingVal.MapRange()\n \t\tfor iter.Next() {\n \n \t\t\tif iter.Key().String() == \"radius\" {\n \t\t\t\trv.Radius = iter.Value().Interface().(string)\n+\t\t\t\tfoundRadius = true\n \t\t\t\tcontinue\n \t\t\t}\n \n@@ -378,11 +380,16 @@ func ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n \t\t\t\t\treturn nil, false\n \t\t\t\t}\n \t\t\t\trv.Center = append(rv.Center, lng, lat)\n+\t\t\t\tfoundCoordinates = true\n \t\t\t}\n \t\t}\n+\t\t// Both radius and coordinates must be present\n+\t\tif foundRadius && foundCoordinates {\n+\t\t\treturn rv, true\n+\t\t}\n \t}\n \n-\treturn rv, true\n+\treturn nil, false\n }\n \n // ExtractGeoShapeCoordinates takes an interface{} and tries it's best to\ndiff --git a/geo/parse.go.bak b/geo/parse.go.bak\nnew file mode 100644\nindex 0000000..24d1015\n--- /dev/null\n+++ b/geo/parse.go.bak\n@@ -0,0 +1,479 @@\n+//  Copyright (c) 2017 Couchbase, Inc.\n+//\n+// Licensed under the Apache License, Version 2.0 (the \"License\");\n+// you may not use this file except in compliance with the License.\n+// You may obtain a copy of the License at\n+//\n+// \t\thttp://www.apache.org/licenses/LICENSE-2.0\n+//\n+// Unless required by applicable law or agreed to in writing, software\n+// distributed under the License is distributed on an \"AS IS\" BASIS,\n+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n+// See the License for the specific language governing permissions and\n+// limitations under the License.\n+\n+package geo\n+\n+import (\n+\t\"reflect\"\n+\t\"strconv\"\n+\t\"strings\"\n+\n+\t\"github.com/blevesearch/bleve/v2/util\"\n+\t\"github.com/blevesearch/geo/geojson\"\n+)\n+\n+// ExtractGeoPoint takes an arbitrary interface{} and tries it's best to\n+// interpret it is as geo point.  Supported formats:\n+// Container:\n+// slice length 2 (GeoJSON)\n+//\n+//\tfirst element lon, second element lat\n+//\n+// string (coordinates separated by comma, or a geohash)\n+//\n+//\tfirst element lat, second element lon\n+//\n+// map[string]interface{}\n+//\n+//\texact keys lat and lon or lng\n+//\n+// struct\n+//\n+//\tw/exported fields case-insensitive match on lat and lon or lng\n+//\n+// struct\n+//\n+//\tsatisfying Later and Loner or Lnger interfaces\n+//\n+// in all cases values must be some sort of numeric-like thing: int/uint/float\n+func ExtractGeoPoint(thing interface{}) (lon, lat float64, success bool) {\n+\tvar foundLon, foundLat bool\n+\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn lon, lat, false\n+\t}\n+\n+\tthingTyp := thingVal.Type()\n+\n+\t// is it a slice\n+\tif thingVal.Kind() == reflect.Slice {\n+\t\t// must be length 2\n+\t\tif thingVal.Len() == 2 {\n+\t\t\tfirst := thingVal.Index(0)\n+\t\t\tif first.CanInterface() {\n+\t\t\t\tfirstVal := first.Interface()\n+\t\t\t\tlon, foundLon = util.ExtractNumericValFloat64(firstVal)\n+\t\t\t}\n+\t\t\tsecond := thingVal.Index(1)\n+\t\t\tif second.CanInterface() {\n+\t\t\t\tsecondVal := second.Interface()\n+\t\t\t\tlat, foundLat = util.ExtractNumericValFloat64(secondVal)\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\t// is it a string\n+\tif thingVal.Kind() == reflect.String {\n+\t\tgeoStr := thingVal.Interface().(string)\n+\t\tif strings.Contains(geoStr, \",\") {\n+\t\t\t// geo point with coordinates split by comma\n+\t\t\tpoints := strings.Split(geoStr, \",\")\n+\t\t\tfor i, point := range points {\n+\t\t\t\t// trim any leading or trailing white spaces\n+\t\t\t\tpoints[i] = strings.TrimSpace(point)\n+\t\t\t}\n+\t\t\tif len(points) == 2 {\n+\t\t\t\tvar err error\n+\t\t\t\tlat, err = strconv.ParseFloat(points[0], 64)\n+\t\t\t\tif err == nil {\n+\t\t\t\t\tfoundLat = true\n+\t\t\t\t}\n+\t\t\t\tlon, err = strconv.ParseFloat(points[1], 64)\n+\t\t\t\tif err == nil {\n+\t\t\t\t\tfoundLon = true\n+\t\t\t\t}\n+\t\t\t}\n+\t\t} else {\n+\t\t\t// geohash\n+\t\t\tif len(geoStr) <= geoHashMaxLength {\n+\t\t\t\tlat, lon = DecodeGeoHash(geoStr)\n+\t\t\t\tfoundLat = true\n+\t\t\t\tfoundLon = true\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\t// is it a map\n+\tif l, ok := thing.(map[string]interface{}); ok {\n+\t\tif lval, ok := l[\"lon\"]; ok {\n+\t\t\tlon, foundLon = util.ExtractNumericValFloat64(lval)\n+\t\t} else if lval, ok := l[\"lng\"]; ok {\n+\t\t\tlon, foundLon = util.ExtractNumericValFloat64(lval)\n+\t\t}\n+\t\tif lval, ok := l[\"lat\"]; ok {\n+\t\t\tlat, foundLat = util.ExtractNumericValFloat64(lval)\n+\t\t}\n+\t}\n+\n+\t// now try reflection on struct fields\n+\tif thingVal.Kind() == reflect.Struct {\n+\t\tfor i := 0; i < thingVal.NumField(); i++ {\n+\t\t\tfieldName := thingTyp.Field(i).Name\n+\t\t\tif strings.HasPrefix(strings.ToLower(fieldName), \"lon\") {\n+\t\t\t\tif thingVal.Field(i).CanInterface() {\n+\t\t\t\t\tfieldVal := thingVal.Field(i).Interface()\n+\t\t\t\t\tlon, foundLon = util.ExtractNumericValFloat64(fieldVal)\n+\t\t\t\t}\n+\t\t\t}\n+\t\t\tif strings.HasPrefix(strings.ToLower(fieldName), \"lng\") {\n+\t\t\t\tif thingVal.Field(i).CanInterface() {\n+\t\t\t\t\tfieldVal := thingVal.Field(i).Interface()\n+\t\t\t\t\tlon, foundLon = util.ExtractNumericValFloat64(fieldVal)\n+\t\t\t\t}\n+\t\t\t}\n+\t\t\tif strings.HasPrefix(strings.ToLower(fieldName), \"lat\") {\n+\t\t\t\tif thingVal.Field(i).CanInterface() {\n+\t\t\t\t\tfieldVal := thingVal.Field(i).Interface()\n+\t\t\t\t\tlat, foundLat = util.ExtractNumericValFloat64(fieldVal)\n+\t\t\t\t}\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\t// last hope, some interfaces\n+\t// lon\n+\tif l, ok := thing.(loner); ok {\n+\t\tlon = l.Lon()\n+\t\tfoundLon = true\n+\t} else if l, ok := thing.(lnger); ok {\n+\t\tlon = l.Lng()\n+\t\tfoundLon = true\n+\t}\n+\t// lat\n+\tif l, ok := thing.(later); ok {\n+\t\tlat = l.Lat()\n+\t\tfoundLat = true\n+\t}\n+\n+\treturn lon, lat, foundLon && foundLat\n+}\n+\n+// various support interfaces which can be used to find lat/lon\n+type loner interface {\n+\tLon() float64\n+}\n+\n+type later interface {\n+\tLat() float64\n+}\n+\n+type lnger interface {\n+\tLng() float64\n+}\n+\n+// GlueBytes primarily for quicker filtering of docvalues\n+// during the filtering phase.\n+var GlueBytes = []byte(\"##\")\n+\n+var GlueBytesOffset = len(GlueBytes)\n+\n+func extractCoordinates(thing interface{}) []float64 {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil\n+\t}\n+\n+\tif thingVal.Kind() == reflect.Slice {\n+\t\t// must be length 2\n+\t\tif thingVal.Len() == 2 {\n+\t\t\tvar foundLon, foundLat bool\n+\t\t\tvar lon, lat float64\n+\t\t\tfirst := thingVal.Index(0)\n+\t\t\tif first.CanInterface() {\n+\t\t\t\tfirstVal := first.Interface()\n+\t\t\t\tlon, foundLon = util.ExtractNumericValFloat64(firstVal)\n+\t\t\t}\n+\t\t\tsecond := thingVal.Index(1)\n+\t\t\tif second.CanInterface() {\n+\t\t\t\tsecondVal := second.Interface()\n+\t\t\t\tlat, foundLat = util.ExtractNumericValFloat64(secondVal)\n+\t\t\t}\n+\n+\t\t\tif !foundLon || !foundLat {\n+\t\t\t\treturn nil\n+\t\t\t}\n+\n+\t\t\treturn []float64{lon, lat}\n+\t\t}\n+\t}\n+\treturn nil\n+}\n+\n+func extract2DCoordinates(thing interface{}) [][]float64 {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil\n+\t}\n+\n+\trv := make([][]float64, 0, 8)\n+\tif thingVal.Kind() == reflect.Slice {\n+\t\tfor j := 0; j < thingVal.Len(); j++ {\n+\t\t\tedges := thingVal.Index(j).Interface()\n+\t\t\tif es, ok := edges.([]interface{}); ok {\n+\t\t\t\tv := extractCoordinates(es)\n+\t\t\t\tif len(v) == 2 {\n+\t\t\t\t\trv = append(rv, v)\n+\t\t\t\t}\n+\t\t\t}\n+\t\t}\n+\n+\t\treturn rv\n+\t}\n+\n+\treturn nil\n+}\n+\n+func extract3DCoordinates(thing interface{}) (c [][][]float64) {\n+\tcoords := reflect.ValueOf(thing)\n+\tif !coords.IsValid() {\n+\t\treturn nil\n+\t}\n+\n+\tif coords.Kind() == reflect.Slice {\n+\t\tfor i := 0; i < coords.Len(); i++ {\n+\t\t\tvals := coords.Index(i)\n+\t\t\tedges := vals.Interface()\n+\t\t\tif es, ok := edges.([]interface{}); ok {\n+\t\t\t\tloop := extract2DCoordinates(es)\n+\t\t\t\tif len(loop) > 0 {\n+\t\t\t\t\tc = append(c, loop)\n+\t\t\t\t}\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\treturn c\n+}\n+\n+func extract4DCoordinates(thing interface{}) (rv [][][][]float64) {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil\n+\t}\n+\n+\tif thingVal.Kind() == reflect.Slice {\n+\t\tfor j := 0; j < thingVal.Len(); j++ {\n+\t\t\tc := extract3DCoordinates(thingVal.Index(j).Interface())\n+\t\t\trv = append(rv, c)\n+\t\t}\n+\t}\n+\n+\treturn rv\n+}\n+\n+func ParseGeoShapeField(thing interface{}) (interface{}, string, error) {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil, \"\", nil\n+\t}\n+\n+\tvar shape string\n+\tvar coordValue interface{}\n+\n+\tif thingVal.Kind() == reflect.Map {\n+\t\titer := thingVal.MapRange()\n+\t\tfor iter.Next() {\n+\t\t\tif iter.Key().String() == \"type\" {\n+\t\t\t\tshape = iter.Value().Interface().(string)\n+\t\t\t\tcontinue\n+\t\t\t}\n+\n+\t\t\tif iter.Key().String() == \"coordinates\" {\n+\t\t\t\tcoordValue = iter.Value().Interface()\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\treturn coordValue, strings.ToLower(shape), nil\n+}\n+\n+func extractGeoShape(thing interface{}) (*geojson.GeoShape, bool) {\n+\n+\tcoordValue, typ, err := ParseGeoShapeField(thing)\n+\tif err != nil {\n+\t\treturn nil, false\n+\t}\n+\n+\tif typ == CircleType {\n+\t\treturn ExtractCircle(thing)\n+\t}\n+\n+\treturn ExtractGeoShapeCoordinates(coordValue, typ)\n+}\n+\n+// ExtractGeometryCollection takes an interface{} and tries it's best to\n+// interpret all the member geojson shapes within it.\n+func ExtractGeometryCollection(thing interface{}) ([]*geojson.GeoShape, bool) {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil, false\n+\t}\n+\tvar rv []*geojson.GeoShape\n+\tvar f bool\n+\n+\tif thingVal.Kind() == reflect.Map {\n+\t\titer := thingVal.MapRange()\n+\t\tfor iter.Next() {\n+\n+\t\t\tif iter.Key().String() == \"type\" {\n+\t\t\t\tcontinue\n+\t\t\t}\n+\n+\t\t\tif iter.Key().String() == \"geometries\" {\n+\t\t\t\tcollection := iter.Value().Interface()\n+\t\t\t\titems := reflect.ValueOf(collection)\n+\n+\t\t\t\tfor j := 0; j < items.Len(); j++ {\n+\t\t\t\t\tshape, found := extractGeoShape(items.Index(j).Interface())\n+\t\t\t\t\tif found {\n+\t\t\t\t\t\tf = found\n+\t\t\t\t\t\trv = append(rv, shape)\n+\t\t\t\t\t}\n+\t\t\t\t}\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\treturn rv, f\n+}\n+\n+// ExtractCircle takes an interface{} and tries it's best to\n+// interpret the center point coordinates and the radius for a\n+// given circle shape.\n+func ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil, false\n+\t}\n+\n+\trv := &geojson.GeoShape{\n+\t\tType:   CircleType,\n+\t\tCenter: make([]float64, 0, 2),\n+\t}\n+\n+\tif thingVal.Kind() == reflect.Map {\n+\t\tvar foundRadius, foundCoordinates bool\n+\t\titer := thingVal.MapRange()\n+\t\tfor iter.Next() {\n+\n+\t\t\tif iter.Key().String() == \"radius\" {\n+\t\t\t\trv.Radius = iter.Value().Interface().(string)\n+\t\t\t\tfoundRadius = true\n+\t\t\t\tcontinue\n+\t\t\t}\n+\n+\t\t\tif iter.Key().String() == \"coordinates\" {\n+\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\n+\t\t\t\tif !found {\n+\t\t\t\t\treturn nil, false\n+\t\t\t\t}\n+\t\t\t\trv.Center = append(rv.Center, lng, lat)\n+\t\t\t\tfoundCoordinates = true\n+\t\t\t}\n+\t\t}\n+\t\t// Both radius and coordinates must be present\n+\t\tif foundRadius && foundCoordinates {\n+\t\t\treturn rv, true\n+\t\t}\n+\t}\n+\n+\treturn nil, false\n+}\n+\t\t\treturn rv, true\n+\t\t}\n+\t}\n+\n+\treturn nil, false\n+}\n+}\n+\n+// ExtractGeoShapeCoordinates takes an interface{} and tries it's best to\n+// interpret the coordinates for any of the given geoshape typ like\n+// a point, multipoint, linestring, multilinestring, polygon, multipolygon,\n+func ExtractGeoShapeCoordinates(coordValue interface{},\n+\ttyp string) (*geojson.GeoShape, bool) {\n+\trv := &geojson.GeoShape{\n+\t\tType: typ,\n+\t}\n+\n+\tif typ == PointType {\n+\t\tpoint := extractCoordinates(coordValue)\n+\n+\t\t// ignore the contents with invalid entry.\n+\t\tif len(point) < 2 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\trv.Coordinates = [][][][]float64{{{point}}}\n+\t\treturn rv, true\n+\t}\n+\n+\tif typ == MultiPointType || typ == LineStringType ||\n+\t\ttyp == EnvelopeType {\n+\t\tcoords := extract2DCoordinates(coordValue)\n+\n+\t\t// ignore the contents with invalid entry.\n+\t\tif len(coords) == 0 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\tif typ == EnvelopeType && len(coords) != 2 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\tif typ == LineStringType && len(coords) < 2 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\trv.Coordinates = [][][][]float64{{coords}}\n+\t\treturn rv, true\n+\t}\n+\n+\tif typ == PolygonType || typ == MultiLineStringType {\n+\t\tcoords := extract3DCoordinates(coordValue)\n+\n+\t\t// ignore the contents with invalid entry.\n+\t\tif len(coords) == 0 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\tif typ == PolygonType && len(coords[0]) < 3 ||\n+\t\t\ttyp == MultiLineStringType && len(coords[0]) < 2 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\trv.Coordinates = [][][][]float64{coords}\n+\t\treturn rv, true\n+\t}\n+\n+\tif typ == MultiPolygonType {\n+\t\tcoords := extract4DCoordinates(coordValue)\n+\n+\t\t// ignore the contents with invalid entry.\n+\t\tif len(coords) == 0 || len(coords[0]) == 0 {\n+\t\t\treturn nil, false\n+\n+\t\t}\n+\n+\t\tif len(coords[0][0]) < 3 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\trv.Coordinates = coords\n+\t\treturn rv, true\n+\t}\n+\n+\treturn rv, false\n+}\ndiff --git a/reproduce_issue.go b/reproduce_issue.go\nnew file mode 100644\nindex 0000000..f551ace\n--- /dev/null\n+++ b/reproduce_issue.go\n@@ -0,0 +1,24 @@\n+package main\n+\n+import (\n+    \"fmt\"\n+    \"github.com/blevesearch/bleve/v2/geo\"\n+)\n+\n+func main() {\n+    // Try to extract a circle from a map representation\n+    circleMap := map[string]interface{}{\n+        \"coordinates\": []float64{-122.4194, 37.7749}, // San Francisco coordinates\n+        \"radius\": \"1km\",\n+    }\n+    \n+    shape, found := geo.ExtractCircle(circleMap)\n+    if !found {\n+        fmt.Println(\"Failed to extract circle from map input\")\n+        return\n+    }\n+    \n+    fmt.Printf(\"Extracted circle: %+v\\n\", shape)\n+    fmt.Printf(\"Center: %v\\n\", shape.Center)\n+    fmt.Printf(\"Radius: %s\\n\", shape.Radius)\n+}\n",
+    "model_stats": {
+      "instance_cost": 0.047669899999999994,
+      "api_calls": 33
+    },
+    "mini_version": "1.14.4",
+    "config": {
+      "agent": {
+        "system_template": "You are a helpful assistant that can interact multiple times with a computer shell to solve programming tasks.\nYour response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).\n\nInclude a THOUGHT section before your command where you explain your reasoning process.\nFormat your response as shown in <format_example>.\n\n<format_example>\nTHOUGHT: Your reasoning and analysis here\n\n```bash\nyour_command_here\n```\n</format_example>\n\nFailure to follow these rules will cause your response to be rejected.\n",
+        "instance_template": "<pr_description>\nConsider the following PR description:\n{{task}}\n</pr_description>\n\n<instructions>\n# Task Instructions\n\n## Overview\nYou're a software engineer interacting continuously with a computer by submitting commands.\nYou'll be helping implement necessary changes to meet requirements in the PR description.\nYour task is specifically to make changes to non-test files in the current directory in order to fix the issue described in the PR description in a way that is general and consistent with the codebase.\n\nIMPORTANT: This is an interactive process where you will think and issue ONE command, see its result, then think and issue your next command.\n\nFor each response:\n1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish\n2. Provide exactly ONE bash command to execute\n\n## Important Boundaries\n- MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)\n- DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)\n\n## Recommended Workflow\n1. Analyze the codebase by finding and reading relevant files\n2. Create a script to reproduce the issue\n3. Edit the source code to resolve the issue\n4. Verify your fix works by running your script again\n5. Test edge cases to ensure your fix is robust\n\n## Command Execution Rules\nYou are operating in an environment where\n1. You write a single command\n2. The system executes that command in a subshell\n3. You see the result\n4. You write your next command\n\nEach response should include:\n1. A **THOUGHT** section where you explain your reasoning and plan\n2. A single bash code block with your command\n\nFormat your responses like this:\n\n<format_example>\nTHOUGHT: Here I explain my reasoning process, analysis of the current situation,\nand what I'm trying to accomplish with the command below.\n\n```bash\nyour_command_here\n```\n</format_example>\n\nCommands must be specified in a single bash code block:\n\n```bash\nyour_command_here\n```\n\n**CRITICAL REQUIREMENTS:**\n- Your response SHOULD include a THOUGHT section explaining your reasoning\n- Your response MUST include EXACTLY ONE bash code block\n- This bash block MUST contain EXACTLY ONE command (or a set of commands connected with && or ||)\n- If you include zero or multiple bash blocks, or no command at all, YOUR RESPONSE WILL FAIL\n- Do NOT try to run multiple independent commands in separate blocks in one response\n- Directory or environment variable changes are not persistent. Every action is executed in a new subshell.\n- However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files\n\nExample of a CORRECT response:\n<example_response>\nTHOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.\n\n```bash\nls -la\n```\n</example_response>\n\nExample of an INCORRECT response:\n<example_response>\nTHOUGHT: I need to examine the codebase and then look at a specific file. I'll run multiple commands to do this.\n\n```bash\nls -la\n```\n\nNow I'll read the file:\n\n```bash\ncat file.txt\n```\n</example_response>\n\nIf you need to run multiple commands, either:\n1. Combine them in one block using && or ||\n```bash\ncommand1 && command2 || echo \"Error occurred\"\n```\n\n2. Wait for the first command to complete, see its output, then issue the next command in your following response.\n\n## Environment Details\n- You have a full Linux shell environment\n- Always use non-interactive flags (-y, -f) for commands\n- Avoid interactive tools like vi, nano, or any that require user input\n- If a command isn't available, you can install it\n\n## Useful Command Examples\n\n### Create a new file:\n```bash\ncat <<'EOF' > newfile.py\nimport numpy as np\nhello = \"world\"\nprint(hello)\nEOF\n```\n\n### Edit files with sed:\n```bash\n# Replace all occurrences\nsed -i 's/old_string/new_string/g' filename.py\n\n# Replace only first occurrence\nsed -i 's/old_string/new_string/' filename.py\n\n# Replace first occurrence on line 1\nsed -i '1s/old_string/new_string/' filename.py\n\n# Replace all occurrences in lines 1-10\nsed -i '1,10s/old_string/new_string/g' filename.py\n```\n\n### View file content:\n```bash\n# View specific lines with numbers\nnl -ba filename.py | sed -n '10,20p'\n```\n\n### Any other command you want to run\n```bash\nanything\n```\n\n## Submission\nWhen you've completed your work (reading, editing, testing), and cannot make further progress\nissue exactly the following command:\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```\n\nThis command will submit your work.\nYou cannot continue working (reading, editing, testing) in any way on this task after submitting.\n</instructions>\n",
+        "timeout_template": "The last command <command>{{action['action']}}</command> timed out and has been killed.\nThe output of the command was:\n <output>\n{{output}}\n</output>\nPlease try another command and make sure to avoid those requiring interactive input.",
+        "format_error_template": "Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.\n\nPlease format your action in triple backticks as shown in <response_example>.\n\n<response_example>\nHere are some thoughts about why you want to perform the action.\n\n```bash\n<action>\n```\n</response_example>\n\nIf you have completed your assignment, please consult the first message about how to\nsubmit your solution (you will not be able to continue working on this task after that).\n",
+        "action_observation_template": "<returncode>{{output.returncode}}</returncode>\n{% if output.output | length < 10000 -%}\n<output>\n{{ output.output -}}\n</output>\n{%- else -%}\n<warning>\nThe output of your last command was too long.\nPlease try a different command that produces less output.\nIf you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.\nIf you're using grep or find and it produced too much output, you can use a more selective search pattern.\nIf you really need to see something from the full command's output, you can redirect output to a file and then search in that file.\n</warning>\n{%- set elided_chars = output.output | length - 10000 -%}\n<output_head>\n{{ output.output[:5000] }}\n</output_head>\n<elided_chars>\n{{ elided_chars }} characters elided\n</elided_chars>\n<output_tail>\n{{ output.output[-5000:] }}\n</output_tail>\n{%- endif -%}\n",
+        "step_limit": 75,
+        "cost_limit": 3.0
+      },
+      "model": {
+        "model_name": "bedrock/qwen.qwen3-coder-480b-a35b-v1:0",
+        "model_kwargs": {
+          "temperature": 0.5,
+          "max_tokens": 2048,
+          "aws_region_name": "us-west-2",
+          "timeout": 600
+        },
+        "litellm_model_registry": "configs/litellm_model_registry.json",
+        "set_cache_control": null
+      },
+      "environment": {
+        "image": "jyangballin/swesmith.x86_64.blevesearch_1776_bleve.f2876b5e",
+        "cwd": "/testbed",
+        "env": {
+          "PAGER": "cat",
+          "MANPAGER": "cat",
+          "LESS": "-R",
+          "PIP_PROGRESS_BAR": "off",
+          "TQDM_DISABLE": "1"
+        },
+        "forward_env": [],
+        "timeout": 60,
+        "executable": "docker",
+        "run_args": [
+          "--rm"
+        ],
+        "container_timeout": "2h",
+        "pull_timeout": 600
+      },
+      "agent_type": "minisweagent.agents.default.DefaultAgent",
+      "model_type": "minisweagent.models.litellm_model.LitellmModel",
+      "environment_type": "minisweagent.environments.docker.DockerEnvironment"
+    }
+  },
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant that can interact multiple times with a computer shell to solve programming tasks.\nYour response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).\n\nInclude a THOUGHT section before your command where you explain your reasoning process.\nFormat your response as shown in <format_example>.\n\n<format_example>\nTHOUGHT: Your reasoning and analysis here\n\n```bash\nyour_command_here\n```\n</format_example>\n\nFailure to follow these rules will cause your response to be rejected."
+    },
+    {
+      "role": "user",
+      "content": "<pr_description>\nConsider the following PR description:\nExtractCircle function fails to parse circle geometry from map input\n\n#### Description\n\nThe `ExtractCircle` function in `geo/parse.go` is not correctly parsing circle geometry data when provided with a map input. The function appears to have inverted logic conditions that prevent it from properly extracting coordinates from map-based circle definitions.\n\n#### Steps/Code to Reproduce\n\n```go\npackage main\n\nimport (\n    \"fmt\"\n    \"github.com/blevesearch/bleve/v2/geo\"\n)\n\nfunc main() {\n    // Try to extract a circle from a map representation\n    circleMap := map[string]interface{}{\n        \"coordinates\": []float64{-122.4194, 37.7749}, // San Francisco coordinates\n        \"radius\": \"1km\",\n    }\n    \n    shape, found := geo.ExtractCircle(circleMap)\n    if !found {\n        fmt.Println(\"Failed to extract circle from map input\")\n        return\n    }\n    \n    fmt.Printf(\"Extracted circle: %+v\\n\", shape)\n}\n```\n\nWhen running this code, the function fails to extract the circle geometry and returns `found = false`, even though the input map contains valid circle data with coordinates.\n\nThe issue seems to affect geospatial indexing operations where circle geometries are defined using map structures, causing indexing failures and potential panics in downstream processing.\n</pr_description>\n\n<instructions>\n# Task Instructions\n\n## Overview\nYou're a software engineer interacting continuously with a computer by submitting commands.\nYou'll be helping implement necessary changes to meet requirements in the PR description.\nYour task is specifically to make changes to non-test files in the current directory in order to fix the issue described in the PR description in a way that is general and consistent with the codebase.\n\nIMPORTANT: This is an interactive process where you will think and issue ONE command, see its result, then think and issue your next command.\n\nFor each response:\n1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish\n2. Provide exactly ONE bash command to execute\n\n## Important Boundaries\n- MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)\n- DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)\n\n## Recommended Workflow\n1. Analyze the codebase by finding and reading relevant files\n2. Create a script to reproduce the issue\n3. Edit the source code to resolve the issue\n4. Verify your fix works by running your script again\n5. Test edge cases to ensure your fix is robust\n\n## Command Execution Rules\nYou are operating in an environment where\n1. You write a single command\n2. The system executes that command in a subshell\n3. You see the result\n4. You write your next command\n\nEach response should include:\n1. A **THOUGHT** section where you explain your reasoning and plan\n2. A single bash code block with your command\n\nFormat your responses like this:\n\n<format_example>\nTHOUGHT: Here I explain my reasoning process, analysis of the current situation,\nand what I'm trying to accomplish with the command below.\n\n```bash\nyour_command_here\n```\n</format_example>\n\nCommands must be specified in a single bash code block:\n\n```bash\nyour_command_here\n```\n\n**CRITICAL REQUIREMENTS:**\n- Your response SHOULD include a THOUGHT section explaining your reasoning\n- Your response MUST include EXACTLY ONE bash code block\n- This bash block MUST contain EXACTLY ONE command (or a set of commands connected with && or ||)\n- If you include zero or multiple bash blocks, or no command at all, YOUR RESPONSE WILL FAIL\n- Do NOT try to run multiple independent commands in separate blocks in one response\n- Directory or environment variable changes are not persistent. Every action is executed in a new subshell.\n- However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files\n\nExample of a CORRECT response:\n<example_response>\nTHOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.\n\n```bash\nls -la\n```\n</example_response>\n\nExample of an INCORRECT response:\n<example_response>\nTHOUGHT: I need to examine the codebase and then look at a specific file. I'll run multiple commands to do this.\n\n```bash\nls -la\n```\n\nNow I'll read the file:\n\n```bash\ncat file.txt\n```\n</example_response>\n\nIf you need to run multiple commands, either:\n1. Combine them in one block using && or ||\n```bash\ncommand1 && command2 || echo \"Error occurred\"\n```\n\n2. Wait for the first command to complete, see its output, then issue the next command in your following response.\n\n## Environment Details\n- You have a full Linux shell environment\n- Always use non-interactive flags (-y, -f) for commands\n- Avoid interactive tools like vi, nano, or any that require user input\n- If a command isn't available, you can install it\n\n## Useful Command Examples\n\n### Create a new file:\n```bash\ncat <<'EOF' > newfile.py\nimport numpy as np\nhello = \"world\"\nprint(hello)\nEOF\n```\n\n### Edit files with sed:\n```bash\n# Replace all occurrences\nsed -i 's/old_string/new_string/g' filename.py\n\n# Replace only first occurrence\nsed -i 's/old_string/new_string/' filename.py\n\n# Replace first occurrence on line 1\nsed -i '1s/old_string/new_string/' filename.py\n\n# Replace all occurrences in lines 1-10\nsed -i '1,10s/old_string/new_string/g' filename.py\n```\n\n### View file content:\n```bash\n# View specific lines with numbers\nnl -ba filename.py | sed -n '10,20p'\n```\n\n### Any other command you want to run\n```bash\nanything\n```\n\n## Submission\nWhen you've completed your work (reading, editing, testing), and cannot make further progress\nissue exactly the following command:\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```\n\nThis command will submit your work.\nYou cannot continue working (reading, editing, testing) in any way on this task after submitting.\n</instructions>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: First, I need to understand the structure of the repository and locate the relevant files. Based on the PR description, the issue is in the `geo/parse.go` file with the `ExtractCircle` function. Let me start by exploring the directory structure to find this file.\n\n```bash\nfind . -type f -name \"*.go\" | grep -E \"(geo|parse)\" | head -20\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-edf22d9a-bb7d-4962-a0be-85a01fb6bc71",
+          "created": 1763088122,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: First, I need to understand the structure of the repository and locate the relevant files. Based on the PR description, the issue is in the `geo/parse.go` file with the `ExtractCircle` function. Let me start by exploring the directory structure to find this file.\n\n```bash\nfind . -type f -name \"*.go\" | grep -E \"(geo|parse)\" | head -20\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 90,
+            "prompt_tokens": 1493,
+            "total_tokens": 1583,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n./search/query/query_string_parser_test.go\n./search/query/geo_boundingbox.go\n./search/query/geo_distance.go\n./search/query/geo_boundingpolygon.go\n./search/query/query_string_parser.go\n./search/query/geo_shape.go\n./search/searcher/search_geopointdistance.go\n./search/searcher/search_geoshape_circle_test.go\n./search/searcher/search_geopolygon.go\n./search/searcher/search_geoshape_envelope_test.go\n./search/searcher/geoshape_within_test.go\n./search/searcher/search_geoboundingbox_test.go\n./search/searcher/search_geoboundingbox.go\n./search/searcher/search_geoshape_geometrycollection_test.go\n./search/searcher/search_geoshape_polygon_test.go\n./search/searcher/search_geopointdistance_test.go\n./search/searcher/search_geoshape.go\n./search/searcher/geoshape_contains_test.go\n./search/searcher/geoshape_intersects_test.go\n./search/searcher/search_geopolygon_test.go\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: I don't see the `geo/parse.go` file in the search results. Let me check if there's a `geo` directory and explore it further.\n\n```bash\nfind . -type d -name \"geo\" | head -10\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-3b755252-106e-42c8-951e-c33a734ad85c",
+          "created": 1763088126,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: I don't see the `geo/parse.go` file in the search results. Let me check if there's a `geo` directory and explore it further.\n\n```bash\nfind . -type d -name \"geo\" | head -10\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 58,
+            "prompt_tokens": 1821,
+            "total_tokens": 1879,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n./test/tests/geo\n./geo\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Great! There is a `geo` directory. Let me explore its contents to find the `parse.go` file mentioned in the PR description.\n\n```bash\nls -la ./geo\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-33df4266-5ef9-40bc-9f71-fb65770c6bc0",
+          "created": 1763088129,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Great! There is a `geo` directory. Let me explore its contents to find the `parse.go` file mentioned in the PR description.\n\n```bash\nls -la ./geo\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 44,
+            "prompt_tokens": 1912,
+            "total_tokens": 1956,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\ntotal 416\ndrwxr-xr-x 2 root root   4096 Jul 14 23:55 .\ndrwxr-xr-x 1 root root   4096 Jul 14 23:55 ..\n-rw-r--r-- 1 root root   8841 Jul 14 23:55 README.md\n-rw-r--r-- 1 root root   1075 Jul 14 23:55 benchmark_geohash_test.go\n-rw-r--r-- 1 root root   5926 Jul 14 23:55 geo.go\n-rw-r--r-- 1 root root   3347 Jul 14 23:55 geo_dist.go\n-rw-r--r-- 1 root root   3249 Jul 14 23:55 geo_dist_test.go\n-rw-r--r-- 1 root root  13422 Jul 14 23:55 geo_s2plugin_impl.go\n-rw-r--r-- 1 root root   4624 Jul 14 23:55 geo_test.go\n-rw-r--r-- 1 root root   2655 Jul 14 23:55 geohash.go\n-rw-r--r-- 1 root root   1804 Jul 14 23:55 geohash_test.go\n-rw-r--r-- 1 root root  10688 Jul 14 23:55 parse.go\n-rw-r--r-- 1 root root  10846 Jul 14 23:55 parse_test.go\n-rw-r--r-- 1 root root   1819 Jul 14 23:55 sloppy.go\n-rw-r--r-- 1 root root 322466 Jul 14 23:55 versus_test.go\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Perfect! I found the `parse.go` file in the `geo` directory. Now I need to examine the `ExtractCircle` function to understand the issue. Let me look at the content of this file, particularly focusing on the `ExtractCircle` function.\n\n```bash\ngrep -n \"ExtractCircle\" ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-6e4f4cd2-c90c-4669-b08d-1c9e5e91eed1",
+          "created": 1763088130,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Perfect! I found the `parse.go` file in the `geo` directory. Now I need to examine the `ExtractCircle` function to understand the issue. Let me look at the content of this file, particularly focusing on the `ExtractCircle` function.\n\n```bash\ngrep -n \"ExtractCircle\" ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 75,
+            "prompt_tokens": 2440,
+            "total_tokens": 2515,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n310:\t\treturn ExtractCircle(thing)\n352:// ExtractCircle takes an interface{} and tries it's best to\n355:func ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: I found the `ExtractCircle` function starting at line 355. Let me examine the implementation of this function to understand the issue with parsing circle geometry from map input.\n\n```bash\nsed -n '352,400p' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-93e53ea9-8f00-4d7e-88ae-411a666062d9",
+          "created": 1763088505,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: I found the `ExtractCircle` function starting at line 355. Let me examine the implementation of this function to understand the issue with parsing circle geometry from map input.\n\n```bash\nsed -n '352,400p' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 64,
+            "prompt_tokens": 2586,
+            "total_tokens": 2650,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n// ExtractCircle takes an interface{} and tries it's best to\n// interpret the center point coordinates and the radius for a\n// given circle shape.\nfunc ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n\tthingVal := reflect.ValueOf(thing)\n\tif !thingVal.IsValid() {\n\t\treturn nil, false\n\t}\n\n\trv := &geojson.GeoShape{\n\t\tType:   CircleType,\n\t\tCenter: make([]float64, 0, 2),\n\t}\n\n\tif thingVal.Kind() == reflect.Map {\n\t\titer := thingVal.MapRange()\n\t\tfor iter.Next() {\n\n\t\t\tif iter.Key().String() == \"radius\" {\n\t\t\t\trv.Radius = iter.Value().Interface().(string)\n\t\t\t\tcontinue\n\t\t\t}\n\n\t\t\tif iter.Key().String() == \"coordinates\" {\n\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\n\t\t\t\tif !found {\n\t\t\t\t\treturn nil, false\n\t\t\t\t}\n\t\t\t\trv.Center = append(rv.Center, lng, lat)\n\t\t\t}\n\t\t}\n\t}\n\n\treturn rv, true\n}\n\n// ExtractGeoShapeCoordinates takes an interface{} and tries it's best to\n// interpret the coordinates for any of the given geoshape typ like\n// a point, multipoint, linestring, multilinestring, polygon, multipolygon,\nfunc ExtractGeoShapeCoordinates(coordValue interface{},\n\ttyp string) (*geojson.GeoShape, bool) {\n\trv := &geojson.GeoShape{\n\t\tType: typ,\n\t}\n\n\tif typ == PointType {\n\t\tpoint := extractCoordinates(coordValue)\n\n\t\t// ignore the contents with invalid entry.\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: I can see the issue now. In the `ExtractCircle` function, when processing a map input, the function doesn't properly validate that both the \"radius\" and \"coordinates\" fields were found in the map. It initializes the return value `rv` but only populates the fields when they are found in the map. However, it always returns `rv, true` regardless of whether both required fields were actually found.\n\nThe problem is that if either \"radius\" or \"coordinates\" (or both) are missing from the map, the function still returns `true` for the `found` parameter, which is incorrect. It should only return `true` if both fields are successfully extracted.\n\nLet me also check if there are any imports or constants I need to be aware of:\n\n```bash\nhead -30 ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-e77cbefd-3eb8-4c30-80b4-e6b4f5ae63b6",
+          "created": 1763088509,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: I can see the issue now. In the `ExtractCircle` function, when processing a map input, the function doesn't properly validate that both the \"radius\" and \"coordinates\" fields were found in the map. It initializes the return value `rv` but only populates the fields when they are found in the map. However, it always returns `rv, true` regardless of whether both required fields were actually found.\n\nThe problem is that if either \"radius\" or \"coordinates\" (or both) are missing from the map, the function still returns `true` for the `found` parameter, which is incorrect. It should only return `true` if both fields are successfully extracted.\n\nLet me also check if there are any imports or constants I need to be aware of:\n\n```bash\nhead -30 ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 178,
+            "prompt_tokens": 3014,
+            "total_tokens": 3192,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n//  Copyright (c) 2017 Couchbase, Inc.\n//\n// Licensed under the Apache License, Version 2.0 (the \"License\");\n// you may not use this file except in compliance with the License.\n// You may obtain a copy of the License at\n//\n// \t\thttp://www.apache.org/licenses/LICENSE-2.0\n//\n// Unless required by applicable law or agreed to in writing, software\n// distributed under the License is distributed on an \"AS IS\" BASIS,\n// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n// See the License for the specific language governing permissions and\n// limitations under the License.\n\npackage geo\n\nimport (\n\t\"reflect\"\n\t\"strconv\"\n\t\"strings\"\n\n\t\"github.com/blevesearch/bleve/v2/util\"\n\t\"github.com/blevesearch/geo/geojson\"\n)\n\n// ExtractGeoPoint takes an arbitrary interface{} and tries it's best to\n// interpret it is as geo point.  Supported formats:\n// Container:\n// slice length 2 (GeoJSON)\n//\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Now I need to look at the test file to understand how the function is expected to work and verify my understanding of the issue. Let me check the test file for `ExtractCircle`.\n\n```bash\ngrep -A 20 -B 5 \"ExtractCircle\" ./geo/parse_test.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-59bf64c5-b2f2-4557-96e2-0e57669733e8",
+          "created": 1763088511,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Now I need to look at the test file to understand how the function is expected to work and verify my understanding of the issue. Let me check the test file for `ExtractCircle`.\n\n```bash\ngrep -A 20 -B 5 \"ExtractCircle\" ./geo/parse_test.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 67,
+            "prompt_tokens": 3436,
+            "total_tokens": 3503,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>1</returncode>\n<output>\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Let me search more broadly for tests related to circle extraction:\n\n```bash\ngrep -i \"circle\" ./geo/parse_test.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-ce1fab36-5e0a-4390-8509-72ab0a73be0a",
+          "created": 1763088512,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Let me search more broadly for tests related to circle extraction:\n\n```bash\ngrep -i \"circle\" ./geo/parse_test.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 34,
+            "prompt_tokens": 3527,
+            "total_tokens": 3561,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n\t\t// valid circle\n\t\t\t\t\"type\":        \"circle\"},\n\t\t\tresTyp:  \"circle\",\n\t\t// invalid circle\n\t\t\t\t\"type\":        \"circle\"},\n\t\t\tresTyp:  \"circle\",\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Let me look at more context around these circle tests to understand how the function should behave:\n\n```bash\ngrep -A 30 -B 10 \"valid circle\" ./geo/parse_test.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-368a7747-5bdc-4f6e-8a74-88756c6e6975",
+          "created": 1763088518,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Let me look at more context around these circle tests to understand how the function should behave:\n\n```bash\ngrep -A 30 -B 10 \"valid circle\" ./geo/parse_test.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 49,
+            "prompt_tokens": 3629,
+            "total_tokens": 3678,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n\t\t},\n\t\t// invalid envelope with >2 vertices\n\t\t{\n\t\t\tin: map[string]interface{}{\n\t\t\t\t\"coordinates\": [][]interface{}{{3.4, 4.4}, {5.6, 6.4}, {7.4, 7.4}},\n\t\t\t\t\"type\":        \"envelope\"},\n\t\t\tresTyp:      \"envelope\",\n\t\t\tcoordinates: nil,\n\t\t\tsuccess:     false,\n\t\t},\n\t\t// valid circle\n\t\t{\n\t\t\tin: map[string]interface{}{\n\t\t\t\t\"coordinates\": []interface{}{4.4, 5.0},\n\t\t\t\t\"radius\":      \"200m\",\n\t\t\t\t\"type\":        \"circle\"},\n\t\t\tresTyp:  \"circle\",\n\t\t\tcenter:  []float64{4.4, 5.0},\n\t\t\tsuccess: true,\n\t\t},\n\t\t// invalid circle\n\t\t{\n\t\t\tin: map[string]interface{}{\n\t\t\t\t\"coordinates\": []interface{}{4.4},\n\t\t\t\t\"radius\":      \"200m\",\n\t\t\t\t\"type\":        \"circle\"},\n\t\t\tresTyp:  \"circle\",\n\t\t\tsuccess: false,\n\t\t},\n\t}\n\n\tfor _, test := range tests {\n\t\tres, success := extractGeoShape(test.in)\n\t\tif success != test.success {\n\t\t\tt.Errorf(\"expected extract geo point: %t, got: %t for: %v\", test.success, success, test.in)\n\t\t}\n\t\tif success && res.Type != test.resTyp {\n\t\t\tt.Errorf(\"expected shape type: %v, got: %v for input: %v\", test.resTyp, res.Type, test.in)\n\t\t}\n\t\tif success && !reflect.DeepEqual(test.coordinates, res.Coordinates) {\n\t\t\tt.Errorf(\"expected result %+v, got %+v for %v\", test.coordinates, res.Coordinates, test.in)\n\t\t}\n\t\tif success && test.center != nil && !reflect.DeepEqual(test.center, res.Center) {\n\t\t\tt.Errorf(\"expected center %+v, got %+v for %v\", test.center, res.Center, test.in)\n\t\t}\n\t}\n}\n\nfunc TestExtractGeoShapeCoordinates(t *testing.T) {\n\ttests := []struct {\n\t\tx        []byte\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Now I understand the issue better. Looking at the test cases, I can see that the `extractGeoShape` function (not `ExtractCircle` directly) is being tested with circle inputs. The tests show that a valid circle should have both \"coordinates\" and \"radius\" fields, and it should fail if either is missing or invalid.\n\nHowever, looking back at the `ExtractCircle` function, I notice that it always returns `true` for the `found` parameter, regardless of whether it actually found and processed both the \"radius\" and \"coordinates\" fields.\n\nThe bug is that the function should verify that both required fields were found before returning `true`. Let me create a simple reproduction script first to confirm the issue:\n\n```bash\ncat <<'EOF' > reproduce_issue.go\npackage main\n\nimport (\n    \"fmt\"\n    \"github.com/blevesearch/bleve/v2/geo\"\n)\n\nfunc main() {\n    // Try to extract a circle from a map representation\n    circleMap := map[string]interface{}{\n        \"coordinates\": []float64{-122.4194, 37.7749}, // San Francisco coordinates\n        \"radius\": \"1km\",\n    }\n    \n    shape, found := geo.ExtractCircle(circleMap)\n    if !found {\n        fmt.Println(\"Failed to extract circle from map input\")\n        return\n    }\n    \n    fmt.Printf(\"Extracted circle: %+v\\n\", shape)\n    fmt.Printf(\"Center: %v\\n\", shape.Center)\n    fmt.Printf(\"Radius: %s\\n\", shape.Radius)\n}\nEOF\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-82174f3c-0f67-48ef-a57b-adce6e11db52",
+          "created": 1763088523,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Now I understand the issue better. Looking at the test cases, I can see that the `extractGeoShape` function (not `ExtractCircle` directly) is being tested with circle inputs. The tests show that a valid circle should have both \"coordinates\" and \"radius\" fields, and it should fail if either is missing or invalid.\n\nHowever, looking back at the `ExtractCircle` function, I notice that it always returns `true` for the `found` parameter, regardless of whether it actually found and processed both the \"radius\" and \"coordinates\" fields.\n\nThe bug is that the function should verify that both required fields were found before returning `true`. Let me create a simple reproduction script first to confirm the issue:\n\n```bash\ncat <<'EOF' > reproduce_issue.go\npackage main\n\nimport (\n    \"fmt\"\n    \"github.com/blevesearch/bleve/v2/geo\"\n)\n\nfunc main() {\n    // Try to extract a circle from a map representation\n    circleMap := map[string]interface{}{\n        \"coordinates\": []float64{-122.4194, 37.7749}, // San Francisco coordinates\n        \"radius\": \"1km\",\n    }\n    \n    shape, found := geo.ExtractCircle(circleMap)\n    if !found {\n        fmt.Println(\"Failed to extract circle from map input\")\n        return\n    }\n    \n    fmt.Printf(\"Extracted circle: %+v\\n\", shape)\n    fmt.Printf(\"Center: %v\\n\", shape.Center)\n    fmt.Printf(\"Radius: %s\\n\", shape.Radius)\n}\nEOF\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 339,
+            "prompt_tokens": 4170,
+            "total_tokens": 4509,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Now let me check if I can run this script to confirm the issue. But first, I need to check if we're in the right directory with the bleve module:\n\n```bash\ngo mod init test && go run reproduce_issue.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-6d29579e-9dd6-4bd1-aef6-dcdd024e9337",
+          "created": 1763088525,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Now let me check if I can run this script to confirm the issue. But first, I need to check if we're in the right directory with the bleve module:\n\n```bash\ngo mod init test && go run reproduce_issue.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 55,
+            "prompt_tokens": 4533,
+            "total_tokens": 4588,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>127</returncode>\n<output>\nbash: line 1: go: command not found\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: It seems Go is not installed in this environment. That's okay; I can still analyze and fix the code based on my understanding. Let me look more closely at the `ExtractCircle` function to identify the exact issue and fix it.\n\nLooking at the function again, the problem is clear:\n1. It processes the map and extracts \"radius\" and \"coordinates\" if they exist\n2. But it always returns `rv, true` regardless of whether both fields were actually found\n3. It should only return `true` if both required fields (\"radius\" and \"coordinates\") were successfully extracted\n\nLet me check if there are any constants or types I need to reference:\n\n```bash\ngrep -n \"CircleType\" ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-4b0380a2-d5bf-42f4-b4bd-44cd04c2d76f",
+          "created": 1763088528,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: It seems Go is not installed in this environment. That's okay; I can still analyze and fix the code based on my understanding. Let me look more closely at the `ExtractCircle` function to identify the exact issue and fix it.\n\nLooking at the function again, the problem is clear:\n1. It processes the map and extracts \"radius\" and \"coordinates\" if they exist\n2. But it always returns `rv, true` regardless of whether both fields were actually found\n3. It should only return `true` if both required fields (\"radius\" and \"coordinates\") were successfully extracted\n\nLet me check if there are any constants or types I need to reference:\n\n```bash\ngrep -n \"CircleType\" ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 159,
+            "prompt_tokens": 4626,
+            "total_tokens": 4785,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n309:\tif typ == CircleType {\n362:\t\tType:   CircleType,\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Now I'll look for the definition of CircleType to make sure I understand the context:\n\n```bash\ngrep -r \"CircleType\" ./geo/\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-26e229cd-5645-426f-bc5b-6480b63c4db3",
+          "created": 1763088530,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Now I'll look for the definition of CircleType to make sure I understand the context:\n\n```bash\ngrep -r \"CircleType\" ./geo/\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 37,
+            "prompt_tokens": 4830,
+            "total_tokens": 4867,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n./geo/geo_s2plugin_impl.go:\tCircleType             = \"circle\"\n./geo/parse.go:\tif typ == CircleType {\n./geo/parse.go:\t\tType:   CircleType,\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Let me check the geo_s2plugin_impl.go file to see the full definition:\n\n```bash\ngrep -A 5 -B 5 \"CircleType\" ./geo/geo_s2plugin_impl.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-d6b1abd0-e847-4341-86a6-ccfae59b5a57",
+          "created": 1763088533,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Let me check the geo_s2plugin_impl.go file to see the full definition:\n\n```bash\ngrep -A 5 -B 5 \"CircleType\" ./geo/geo_s2plugin_impl.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 49,
+            "prompt_tokens": 4934,
+            "total_tokens": 4983,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n\tLineStringType         = \"linestring\"\n\tMultiLineStringType    = \"multilinestring\"\n\tPolygonType            = \"polygon\"\n\tMultiPolygonType       = \"multipolygon\"\n\tGeometryCollectionType = \"geometrycollection\"\n\tCircleType             = \"circle\"\n\tEnvelopeType           = \"envelope\"\n)\n\n// spatialPluginsMap is spatial plugin cache.\nvar (\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Now I have a good understanding of the issue. The `ExtractCircle` function has a bug where it always returns `true` for the `found` parameter, even when required fields are missing from the input map.\n\nHere's what needs to be fixed:\n1. The function should track whether both \"radius\" and \"coordinates\" fields were found\n2. It should only return `true` if both fields were successfully processed\n3. If either field is missing, it should return `nil, false`\n\nLet me implement the fix:\n\n```bash\nsed -i '355,385c\\\n// ExtractCircle takes an interface{} and tries it'\"'\"'s best to\\\n// interpret the center point coordinates and the radius for a\\\n// given circle shape.\\\nfunc ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\\\n\tthingVal := reflect.ValueOf(thing)\\\n\tif !thingVal.IsValid() {\\\n\t\treturn nil, false\\\n\t}\\\n\\\n\trv := &geojson.GeoShape{\\\n\t\tType:   CircleType,\\\n\t\tCenter: make([]float64, 0, 2),\\\n\t}\\\n\\\n\tif thingVal.Kind() == reflect.Map {\\\n\t\tvar foundRadius, foundCoordinates bool\\\n\t\titer := thingVal.MapRange()\\\n\t\tfor iter.Next() {\\\n\\\n\t\t\tif iter.Key().String() == \"radius\" {\\\n\t\t\t\trv.Radius = iter.Value().Interface().(string)\\\n\t\t\t\tfoundRadius = true\\\n\t\t\t\tcontinue\\\n\t\t\t}\\\n\\\n\t\t\tif iter.Key().String() == \"coordinates\" {\\\n\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\\\n\t\t\t\tif !found {\\\n\t\t\t\t\treturn nil, false\\\n\t\t\t\t}\\\n\t\t\t\trv.Center = append(rv.Center, lng, lat)\\\n\t\t\t\tfoundCoordinates = true\\\n\t\t\t}\\\n\t\t}\\\n\t\t// Both radius and coordinates must be present\\\n\t\tif foundRadius && foundCoordinates {\\\n\t\t\treturn rv, true\\\n\t\t}\\\n\t}\\\n\\\n\treturn nil, false\\\n}' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-3f4b3c30-5fd3-4727-a2a1-e79a12c82269",
+          "created": 1763088552,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Now I have a good understanding of the issue. The `ExtractCircle` function has a bug where it always returns `true` for the `found` parameter, even when required fields are missing from the input map.\n\nHere's what needs to be fixed:\n1. The function should track whether both \"radius\" and \"coordinates\" fields were found\n2. It should only return `true` if both fields were successfully processed\n3. If either field is missing, it should return `nil, false`\n\nLet me implement the fix:\n\n```bash\nsed -i '355,385c\\\n// ExtractCircle takes an interface{} and tries it'\"'\"'s best to\\\n// interpret the center point coordinates and the radius for a\\\n// given circle shape.\\\nfunc ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\\\n\tthingVal := reflect.ValueOf(thing)\\\n\tif !thingVal.IsValid() {\\\n\t\treturn nil, false\\\n\t}\\\n\\\n\trv := &geojson.GeoShape{\\\n\t\tType:   CircleType,\\\n\t\tCenter: make([]float64, 0, 2),\\\n\t}\\\n\\\n\tif thingVal.Kind() == reflect.Map {\\\n\t\tvar foundRadius, foundCoordinates bool\\\n\t\titer := thingVal.MapRange()\\\n\t\tfor iter.Next() {\\\n\\\n\t\t\tif iter.Key().String() == \"radius\" {\\\n\t\t\t\trv.Radius = iter.Value().Interface().(string)\\\n\t\t\t\tfoundRadius = true\\\n\t\t\t\tcontinue\\\n\t\t\t}\\\n\\\n\t\t\tif iter.Key().String() == \"coordinates\" {\\\n\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\\\n\t\t\t\tif !found {\\\n\t\t\t\t\treturn nil, false\\\n\t\t\t\t}\\\n\t\t\t\trv.Center = append(rv.Center, lng, lat)\\\n\t\t\t\tfoundCoordinates = true\\\n\t\t\t}\\\n\t\t}\\\n\t\t// Both radius and coordinates must be present\\\n\t\tif foundRadius && foundCoordinates {\\\n\t\t\treturn rv, true\\\n\t\t}\\\n\t}\\\n\\\n\treturn nil, false\\\n}' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 434,
+            "prompt_tokens": 5086,
+            "total_tokens": 5520,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Let me verify that my changes were applied correctly by checking the modified function:\n\n```bash\nsed -n '352,390p' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-caa2fe0a-7721-4041-b3e7-ada4326be5d6",
+          "created": 1763088553,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Let me verify that my changes were applied correctly by checking the modified function:\n\n```bash\nsed -n '352,390p' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 43,
+            "prompt_tokens": 5544,
+            "total_tokens": 5587,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n// ExtractCircle takes an interface{} and tries it's best to\n// interpret the center point coordinates and the radius for a\n// given circle shape.\n// ExtractCircle takes an interface{} and tries it's best to\n// interpret the center point coordinates and the radius for a\n// given circle shape.\nfunc ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n\tthingVal := reflect.ValueOf(thing)\n\tif !thingVal.IsValid() {\n\t\treturn nil, false\n\t}\n\n\trv := &geojson.GeoShape{\n\t\tType:   CircleType,\n\t\tCenter: make([]float64, 0, 2),\n\t}\n\n\tif thingVal.Kind() == reflect.Map {\n\t\tvar foundRadius, foundCoordinates bool\n\t\titer := thingVal.MapRange()\n\t\tfor iter.Next() {\n\n\t\t\tif iter.Key().String() == \"radius\" {\n\t\t\t\trv.Radius = iter.Value().Interface().(string)\n\t\t\t\tfoundRadius = true\n\t\t\t\tcontinue\n\t\t\t}\n\n\t\t\tif iter.Key().String() == \"coordinates\" {\n\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\n\t\t\t\tif !found {\n\t\t\t\t\treturn nil, false\n\t\t\t\t}\n\t\t\t\trv.Center = append(rv.Center, lng, lat)\n\t\t\t\tfoundCoordinates = true\n\t\t\t}\n\t\t}\n\t\t// Both radius and coordinates must be present\n\t\tif foundRadius && foundCoordinates {\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: I see there's a duplication in the comments. Let me fix that and complete the function properly:\n\n```bash\nsed -i '352,390d' ./geo/parse.go\nsed -i '352i\\\n// ExtractCircle takes an interface{} and tries it'\"'\"'s best to\\\n// interpret the center point coordinates and the radius for a\\\n// given circle shape.\\\nfunc ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\\\n\tthingVal := reflect.ValueOf(thing)\\\n\tif !thingVal.IsValid() {\\\n\t\treturn nil, false\\\n\t}\\\n\\\n\trv := &geojson.GeoShape{\\\n\t\tType:   CircleType,\\\n\t\tCenter: make([]float64, 0, 2),\\\n\t}\\\n\\\n\tif thingVal.Kind() == reflect.Map {\\\n\t\tvar foundRadius, foundCoordinates bool\\\n\t\titer := thingVal.MapRange()\\\n\t\tfor iter.Next() {\\\n\\\n\t\t\tif iter.Key().String() == \"radius\" {\\\n\t\t\t\trv.Radius = iter.Value().Interface().(string)\\\n\t\t\t\tfoundRadius = true\\\n\t\t\t\tcontinue\\\n\t\t\t}\\\n\\\n\t\t\tif iter.Key().String() == \"coordinates\" {\\\n\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\\\n\t\t\t\tif !found {\\\n\t\t\t\t\treturn nil, false\\\n\t\t\t\t}\\\n\t\t\t\trv.Center = append(rv.Center, lng, lat)\\\n\t\t\t\tfoundCoordinates = true\\\n\t\t\t}\\\n\t\t}\\\n\t\t// Both radius and coordinates must be present\\\n\t\tif foundRadius && foundCoordinates {\\\n\t\t\treturn rv, true\\\n\t\t}\\\n\t}\\\n\\\n\treturn nil, false\\\n}' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-7308c460-69e6-45db-9a1c-7de2c48449cc",
+          "created": 1763088564,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: I see there's a duplication in the comments. Let me fix that and complete the function properly:\n\n```bash\nsed -i '352,390d' ./geo/parse.go\nsed -i '352i\\\n// ExtractCircle takes an interface{} and tries it'\"'\"'s best to\\\n// interpret the center point coordinates and the radius for a\\\n// given circle shape.\\\nfunc ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\\\n\tthingVal := reflect.ValueOf(thing)\\\n\tif !thingVal.IsValid() {\\\n\t\treturn nil, false\\\n\t}\\\n\\\n\trv := &geojson.GeoShape{\\\n\t\tType:   CircleType,\\\n\t\tCenter: make([]float64, 0, 2),\\\n\t}\\\n\\\n\tif thingVal.Kind() == reflect.Map {\\\n\t\tvar foundRadius, foundCoordinates bool\\\n\t\titer := thingVal.MapRange()\\\n\t\tfor iter.Next() {\\\n\\\n\t\t\tif iter.Key().String() == \"radius\" {\\\n\t\t\t\trv.Radius = iter.Value().Interface().(string)\\\n\t\t\t\tfoundRadius = true\\\n\t\t\t\tcontinue\\\n\t\t\t}\\\n\\\n\t\t\tif iter.Key().String() == \"coordinates\" {\\\n\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\\\n\t\t\t\tif !found {\\\n\t\t\t\t\treturn nil, false\\\n\t\t\t\t}\\\n\t\t\t\trv.Center = append(rv.Center, lng, lat)\\\n\t\t\t\tfoundCoordinates = true\\\n\t\t\t}\\\n\t\t}\\\n\t\t// Both radius and coordinates must be present\\\n\t\tif foundRadius && foundCoordinates {\\\n\t\t\treturn rv, true\\\n\t\t}\\\n\t}\\\n\\\n\treturn nil, false\\\n}' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 360,
+            "prompt_tokens": 5901,
+            "total_tokens": 6261,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Let me verify that the function was correctly updated:\n\n```bash\nsed -n '352,385p' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-9f90a4aa-7d82-483c-ae81-c4a5ff2cd52e",
+          "created": 1763088567,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Let me verify that the function was correctly updated:\n\n```bash\nsed -n '352,385p' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 38,
+            "prompt_tokens": 6285,
+            "total_tokens": 6323,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n// ExtractCircle takes an interface{} and tries it's best to\n// interpret the center point coordinates and the radius for a\n// given circle shape.\nfunc ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n\tthingVal := reflect.ValueOf(thing)\n\tif !thingVal.IsValid() {\n\t\treturn nil, false\n\t}\n\n\trv := &geojson.GeoShape{\n\t\tType:   CircleType,\n\t\tCenter: make([]float64, 0, 2),\n\t}\n\n\tif thingVal.Kind() == reflect.Map {\n\t\tvar foundRadius, foundCoordinates bool\n\t\titer := thingVal.MapRange()\n\t\tfor iter.Next() {\n\n\t\t\tif iter.Key().String() == \"radius\" {\n\t\t\t\trv.Radius = iter.Value().Interface().(string)\n\t\t\t\tfoundRadius = true\n\t\t\t\tcontinue\n\t\t\t}\n\n\t\t\tif iter.Key().String() == \"coordinates\" {\n\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\n\t\t\t\tif !found {\n\t\t\t\t\treturn nil, false\n\t\t\t\t}\n\t\t\t\trv.Center = append(rv.Center, lng, lat)\n\t\t\t\tfoundCoordinates = true\n\t\t\t}\n\t\t}\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Let me see the rest of the function to make sure it's complete:\n\n```bash\nsed -n '385,395p' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-d35e2e2c-b131-4057-b3fd-e97b91e79f2d",
+          "created": 1763088568,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Let me see the rest of the function to make sure it's complete:\n\n```bash\nsed -n '385,395p' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 43,
+            "prompt_tokens": 6587,
+            "total_tokens": 6630,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n\t\t}\n\t\t// Both radius and coordinates must be present\n\t\tif foundRadius && foundCoordinates {\n\t\t\treturn rv, true\n\t\t}\n\t}\n\n\treturn nil, false\n}\n\t\t\treturn rv, true\n\t\t}\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: There seems to be some corruption in the file. Let me check the entire function and fix it properly:\n\n```bash\nsed -n '352,400p' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-216109c9-bc8d-4ca0-a578-5e7aade5b74f",
+          "created": 1763088569,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: There seems to be some corruption in the file. Let me check the entire function and fix it properly:\n\n```bash\nsed -n '352,400p' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 49,
+            "prompt_tokens": 6702,
+            "total_tokens": 6751,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n// ExtractCircle takes an interface{} and tries it's best to\n// interpret the center point coordinates and the radius for a\n// given circle shape.\nfunc ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n\tthingVal := reflect.ValueOf(thing)\n\tif !thingVal.IsValid() {\n\t\treturn nil, false\n\t}\n\n\trv := &geojson.GeoShape{\n\t\tType:   CircleType,\n\t\tCenter: make([]float64, 0, 2),\n\t}\n\n\tif thingVal.Kind() == reflect.Map {\n\t\tvar foundRadius, foundCoordinates bool\n\t\titer := thingVal.MapRange()\n\t\tfor iter.Next() {\n\n\t\t\tif iter.Key().String() == \"radius\" {\n\t\t\t\trv.Radius = iter.Value().Interface().(string)\n\t\t\t\tfoundRadius = true\n\t\t\t\tcontinue\n\t\t\t}\n\n\t\t\tif iter.Key().String() == \"coordinates\" {\n\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\n\t\t\t\tif !found {\n\t\t\t\t\treturn nil, false\n\t\t\t\t}\n\t\t\t\trv.Center = append(rv.Center, lng, lat)\n\t\t\t\tfoundCoordinates = true\n\t\t\t}\n\t\t}\n\t\t// Both radius and coordinates must be present\n\t\tif foundRadius && foundCoordinates {\n\t\t\treturn rv, true\n\t\t}\n\t}\n\n\treturn nil, false\n}\n\t\t\treturn rv, true\n\t\t}\n\t}\n\n\treturn nil, false\n}\n}\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: The file is corrupted with duplicate content. Let me rewrite the entire function properly:\n\n```bash\n# First, let's backup the original file\ncp ./geo/parse.go ./geo/parse.go.bak\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-1aa0c4c1-6d93-4474-9d1a-bd9cce185cab",
+          "created": 1763088571,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: The file is corrupted with duplicate content. Let me rewrite the entire function properly:\n\n```bash\n# First, let's backup the original file\ncp ./geo/parse.go ./geo/parse.go.bak\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 49,
+            "prompt_tokens": 7069,
+            "total_tokens": 7118,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Now let me get the original function and replace it with the correct implementation:\n\n```bash\n# Get the original function lines\ngrep -n \"func ExtractCircle\" ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-cc6f91a0-fd42-4abf-b629-ea33f4a85ef0",
+          "created": 1763088573,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Now let me get the original function and replace it with the correct implementation:\n\n```bash\n# Get the original function lines\ngrep -n \"func ExtractCircle\" ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 45,
+            "prompt_tokens": 7142,
+            "total_tokens": 7187,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n355:func ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Let me find the end of the function to understand its boundaries:\n\n```bash\nsed -n '355,400p' ./geo/parse.go | grep -n \"^}\"\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-3aef9688-a3ee-4e1b-9d34-234472cad5e1",
+          "created": 1763088574,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Let me find the end of the function to understand its boundaries:\n\n```bash\nsed -n '355,400p' ./geo/parse.go | grep -n \"^}\"\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 46,
+            "prompt_tokens": 7231,
+            "total_tokens": 7277,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n39:}\n45:}\n46:}\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Let me check more carefully where the function ends:\n\n```bash\nawk 'NR>=355 {print NR \": \" $0} /^}/ {if(NR>=355) exit}' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-61a208cf-6cd6-4038-b529-f3424741dd92",
+          "created": 1763088578,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Let me check more carefully where the function ends:\n\n```bash\nawk 'NR>=355 {print NR \": \" $0} /^}/ {if(NR>=355) exit}' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 53,
+            "prompt_tokens": 7313,
+            "total_tokens": 7366,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n355: func ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n356: \tthingVal := reflect.ValueOf(thing)\n357: \tif !thingVal.IsValid() {\n358: \t\treturn nil, false\n359: \t}\n360: \n361: \trv := &geojson.GeoShape{\n362: \t\tType:   CircleType,\n363: \t\tCenter: make([]float64, 0, 2),\n364: \t}\n365: \n366: \tif thingVal.Kind() == reflect.Map {\n367: \t\tvar foundRadius, foundCoordinates bool\n368: \t\titer := thingVal.MapRange()\n369: \t\tfor iter.Next() {\n370: \n371: \t\t\tif iter.Key().String() == \"radius\" {\n372: \t\t\t\trv.Radius = iter.Value().Interface().(string)\n373: \t\t\t\tfoundRadius = true\n374: \t\t\t\tcontinue\n375: \t\t\t}\n376: \n377: \t\t\tif iter.Key().String() == \"coordinates\" {\n378: \t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\n379: \t\t\t\tif !found {\n380: \t\t\t\t\treturn nil, false\n381: \t\t\t\t}\n382: \t\t\t\trv.Center = append(rv.Center, lng, lat)\n383: \t\t\t\tfoundCoordinates = true\n384: \t\t\t}\n385: \t\t}\n386: \t\t// Both radius and coordinates must be present\n387: \t\tif foundRadius && foundCoordinates {\n388: \t\t\treturn rv, true\n389: \t\t}\n390: \t}\n391: \n392: \treturn nil, false\n393: }\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Great! Now I can see the complete function. It looks like my modification was actually successful, but there might be some duplicate content after it. Let me check what comes after line 393:\n\n```bash\nsed -n '393,400p' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-d5f323cf-bf7a-4065-8bf4-bb8b448a9f74",
+          "created": 1763088579,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Great! Now I can see the complete function. It looks like my modification was actually successful, but there might be some duplicate content after it. Let me check what comes after line 393:\n\n```bash\nsed -n '393,400p' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 69,
+            "prompt_tokens": 7804,
+            "total_tokens": 7873,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n}\n\t\t\treturn rv, true\n\t\t}\n\t}\n\n\treturn nil, false\n}\n}\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: There is indeed duplicate content. Let me remove the duplicate part and keep only the corrected function:\n\n```bash\n# Remove lines 394-400 which are duplicates\nsed -i '394,400d' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-04d5860a-e709-4f20-9923-71e990c91dbc",
+          "created": 1763088583,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: There is indeed duplicate content. Let me remove the duplicate part and keep only the corrected function:\n\n```bash\n# Remove lines 394-400 which are duplicates\nsed -i '394,400d' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 62,
+            "prompt_tokens": 7916,
+            "total_tokens": 7978,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Now let me verify the function is clean and correct:\n\n```bash\nsed -n '352,395p' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-e9453579-fc9c-4834-ac51-55e8ba5b4fa8",
+          "created": 1763088584,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Now let me verify the function is clean and correct:\n\n```bash\nsed -n '352,395p' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 39,
+            "prompt_tokens": 8002,
+            "total_tokens": 8041,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n// ExtractCircle takes an interface{} and tries it's best to\n// interpret the center point coordinates and the radius for a\n// given circle shape.\nfunc ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n\tthingVal := reflect.ValueOf(thing)\n\tif !thingVal.IsValid() {\n\t\treturn nil, false\n\t}\n\n\trv := &geojson.GeoShape{\n\t\tType:   CircleType,\n\t\tCenter: make([]float64, 0, 2),\n\t}\n\n\tif thingVal.Kind() == reflect.Map {\n\t\tvar foundRadius, foundCoordinates bool\n\t\titer := thingVal.MapRange()\n\t\tfor iter.Next() {\n\n\t\t\tif iter.Key().String() == \"radius\" {\n\t\t\t\trv.Radius = iter.Value().Interface().(string)\n\t\t\t\tfoundRadius = true\n\t\t\t\tcontinue\n\t\t\t}\n\n\t\t\tif iter.Key().String() == \"coordinates\" {\n\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\n\t\t\t\tif !found {\n\t\t\t\t\treturn nil, false\n\t\t\t\t}\n\t\t\t\trv.Center = append(rv.Center, lng, lat)\n\t\t\t\tfoundCoordinates = true\n\t\t\t}\n\t\t}\n\t\t// Both radius and coordinates must be present\n\t\tif foundRadius && foundCoordinates {\n\t\t\treturn rv, true\n\t\t}\n\t}\n\n\treturn nil, false\n}\n\n// ExtractGeoShapeCoordinates takes an interface{} and tries it's best to\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Perfect! The function looks correct now. Let me run the existing tests to make sure my fix doesn't break anything:\n\n```bash\necho \"Unfortunately, I cannot run tests in this environment as Go is not installed.\"\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-54a8d54d-3b2c-4569-8168-8a2e89d6a468",
+          "created": 1763088586,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Perfect! The function looks correct now. Let me run the existing tests to make sure my fix doesn't break anything:\n\n```bash\necho \"Unfortunately, I cannot run tests in this environment as Go is not installed.\"\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 50,
+            "prompt_tokens": 8357,
+            "total_tokens": 8407,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\nUnfortunately, I cannot run tests in this environment as Go is not installed.\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Let me review my changes once more to ensure they correctly address the issue described in the PR. The problem was that the `ExtractCircle` function would return `true` even when required fields were missing from the map input. My fix ensures that:\n\n1. It tracks whether both \"radius\" and \"coordinates\" fields are found\n2. It only returns `true` if both fields are successfully processed\n3. It returns `nil, false` if either field is missing\n\nLet me also check if there are other parts of the function that handle non-map inputs that I might have affected:\n\n```bash\n# Check if there are other branches in the function for different input types\nsed -n '352,393p' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-0ed6e953-ae52-4461-a360-69eb7910adf1",
+          "created": 1763088588,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Let me review my changes once more to ensure they correctly address the issue described in the PR. The problem was that the `ExtractCircle` function would return `true` even when required fields were missing from the map input. My fix ensures that:\n\n1. It tracks whether both \"radius\" and \"coordinates\" fields are found\n2. It only returns `true` if both fields are successfully processed\n3. It returns `nil, false` if either field is missing\n\nLet me also check if there are other parts of the function that handle non-map inputs that I might have affected:\n\n```bash\n# Check if there are other branches in the function for different input types\nsed -n '352,393p' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 163,
+            "prompt_tokens": 8446,
+            "total_tokens": 8609,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n// ExtractCircle takes an interface{} and tries it's best to\n// interpret the center point coordinates and the radius for a\n// given circle shape.\nfunc ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n\tthingVal := reflect.ValueOf(thing)\n\tif !thingVal.IsValid() {\n\t\treturn nil, false\n\t}\n\n\trv := &geojson.GeoShape{\n\t\tType:   CircleType,\n\t\tCenter: make([]float64, 0, 2),\n\t}\n\n\tif thingVal.Kind() == reflect.Map {\n\t\tvar foundRadius, foundCoordinates bool\n\t\titer := thingVal.MapRange()\n\t\tfor iter.Next() {\n\n\t\t\tif iter.Key().String() == \"radius\" {\n\t\t\t\trv.Radius = iter.Value().Interface().(string)\n\t\t\t\tfoundRadius = true\n\t\t\t\tcontinue\n\t\t\t}\n\n\t\t\tif iter.Key().String() == \"coordinates\" {\n\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\n\t\t\t\tif !found {\n\t\t\t\t\treturn nil, false\n\t\t\t\t}\n\t\t\t\trv.Center = append(rv.Center, lng, lat)\n\t\t\t\tfoundCoordinates = true\n\t\t\t}\n\t\t}\n\t\t// Both radius and coordinates must be present\n\t\tif foundRadius && foundCoordinates {\n\t\t\treturn rv, true\n\t\t}\n\t}\n\n\treturn nil, false\n}\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: I notice that the function only handles map inputs (reflect.Map) and doesn't have implementations for other types of inputs. This might be intentional, but let me check if there was originally more code that handled other input types by looking at the git history or checking if there are other similar functions:\n\n```bash\n# Check if there are other similar extract functions to understand the pattern\ngrep -n \"func Extract\" ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-1cc7687b-b693-45af-a6ca-0f0498631d60",
+          "created": 1763088593,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: I notice that the function only handles map inputs (reflect.Map) and doesn't have implementations for other types of inputs. This might be intentional, but let me check if there was originally more code that handled other input types by looking at the git history or checking if there are other similar functions:\n\n```bash\n# Check if there are other similar extract functions to understand the pattern\ngrep -n \"func Extract\" ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 95,
+            "prompt_tokens": 8909,
+            "total_tokens": 9004,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n50:func ExtractGeoPoint(thing interface{}) (lon, lat float64, success bool) {\n318:func ExtractGeometryCollection(thing interface{}) ([]*geojson.GeoShape, bool) {\n355:func ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n398:func ExtractGeoShapeCoordinates(coordValue interface{},\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: Let me check the ExtractGeoPoint function to see if it handles multiple input types, which might indicate that ExtractCircle should also handle multiple input types:\n\n```bash\nsed -n '50,100p' ./geo/parse.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-8c53aa3a-1088-475e-852d-353b67f5421b",
+          "created": 1763088595,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: Let me check the ExtractGeoPoint function to see if it handles multiple input types, which might indicate that ExtractCircle should also handle multiple input types:\n\n```bash\nsed -n '50,100p' ./geo/parse.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 57,
+            "prompt_tokens": 9105,
+            "total_tokens": 9162,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\nfunc ExtractGeoPoint(thing interface{}) (lon, lat float64, success bool) {\n\tvar foundLon, foundLat bool\n\n\tthingVal := reflect.ValueOf(thing)\n\tif !thingVal.IsValid() {\n\t\treturn lon, lat, false\n\t}\n\n\tthingTyp := thingVal.Type()\n\n\t// is it a slice\n\tif thingVal.Kind() == reflect.Slice {\n\t\t// must be length 2\n\t\tif thingVal.Len() == 2 {\n\t\t\tfirst := thingVal.Index(0)\n\t\t\tif first.CanInterface() {\n\t\t\t\tfirstVal := first.Interface()\n\t\t\t\tlon, foundLon = util.ExtractNumericValFloat64(firstVal)\n\t\t\t}\n\t\t\tsecond := thingVal.Index(1)\n\t\t\tif second.CanInterface() {\n\t\t\t\tsecondVal := second.Interface()\n\t\t\t\tlat, foundLat = util.ExtractNumericValFloat64(secondVal)\n\t\t\t}\n\t\t}\n\t}\n\n\t// is it a string\n\tif thingVal.Kind() == reflect.String {\n\t\tgeoStr := thingVal.Interface().(string)\n\t\tif strings.Contains(geoStr, \",\") {\n\t\t\t// geo point with coordinates split by comma\n\t\t\tpoints := strings.Split(geoStr, \",\")\n\t\t\tfor i, point := range points {\n\t\t\t\t// trim any leading or trailing white spaces\n\t\t\t\tpoints[i] = strings.TrimSpace(point)\n\t\t\t}\n\t\t\tif len(points) == 2 {\n\t\t\t\tvar err error\n\t\t\t\tlat, err = strconv.ParseFloat(points[0], 64)\n\t\t\t\tif err == nil {\n\t\t\t\t\tfoundLat = true\n\t\t\t\t}\n\t\t\t\tlon, err = strconv.ParseFloat(points[1], 64)\n\t\t\t\tif err == nil {\n\t\t\t\t\tfoundLon = true\n\t\t\t\t}\n\t\t\t}\n\t\t} else {\n\t\t\t// geohash\n\t\t\tif len(geoStr) <= geoHashMaxLength {\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: I can see that `ExtractGeoPoint` handles multiple input types (slice, string, etc.). However, looking at the original `ExtractCircle` function and the test cases, it seems that circles are primarily expected to be provided as maps with \"coordinates\" and \"radius\" fields.\n\nMy fix maintains the same behavior for map inputs but correctly validates that both required fields are present. For non-map inputs, the function would naturally fall through to return `nil, false`, which is appropriate since the function is designed to extract circles from map-like structures.\n\nLet me double-check the test cases to make sure my understanding is correct:\n\n```bash\ngrep -A 10 -B 5 \"circle\" ./geo/parse_test.go\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-ca992355-9c86-4ae7-9ab6-b93abd81e30b",
+          "created": 1763088600,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: I can see that `ExtractGeoPoint` handles multiple input types (slice, string, etc.). However, looking at the original `ExtractCircle` function and the test cases, it seems that circles are primarily expected to be provided as maps with \"coordinates\" and \"radius\" fields.\n\nMy fix maintains the same behavior for map inputs but correctly validates that both required fields are present. For non-map inputs, the function would naturally fall through to return `nil, false`, which is appropriate since the function is designed to extract circles from map-like structures.\n\nLet me double-check the test cases to make sure my understanding is correct:\n\n```bash\ngrep -A 10 -B 5 \"circle\" ./geo/parse_test.go\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 155,
+            "prompt_tokens": 9575,
+            "total_tokens": 9730,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "<returncode>0</returncode>\n<output>\n\t\t\t\t\"type\":        \"envelope\"},\n\t\t\tresTyp:      \"envelope\",\n\t\t\tcoordinates: nil,\n\t\t\tsuccess:     false,\n\t\t},\n\t\t// valid circle\n\t\t{\n\t\t\tin: map[string]interface{}{\n\t\t\t\t\"coordinates\": []interface{}{4.4, 5.0},\n\t\t\t\t\"radius\":      \"200m\",\n\t\t\t\t\"type\":        \"circle\"},\n\t\t\tresTyp:  \"circle\",\n\t\t\tcenter:  []float64{4.4, 5.0},\n\t\t\tsuccess: true,\n\t\t},\n\t\t// invalid circle\n\t\t{\n\t\t\tin: map[string]interface{}{\n\t\t\t\t\"coordinates\": []interface{}{4.4},\n\t\t\t\t\"radius\":      \"200m\",\n\t\t\t\t\"type\":        \"circle\"},\n\t\t\tresTyp:  \"circle\",\n\t\t\tsuccess: false,\n\t\t},\n\t}\n\n\tfor _, test := range tests {\n\t\tres, success := extractGeoShape(test.in)\n\t\tif success != test.success {\n\t\t\tt.Errorf(\"expected extract geo point: %t, got: %t for: %v\", test.success, success, test.in)\n\t\t}\n\t\tif success && res.Type != test.resTyp {\n</output>"
+    },
+    {
+      "role": "assistant",
+      "content": "THOUGHT: The test cases confirm my understanding. Circles are expected to be provided as maps with \"coordinates\" and \"radius\" fields. The tests show:\n1. A valid circle with both fields should succeed\n2. An invalid circle with missing/incorrect coordinates should fail\n\nMy fix correctly addresses the issue by ensuring that both \"radius\" and \"coordinates\" are present in the map before returning success. Let me now create a comprehensive summary of what I've done:\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```",
+      "extra": {
+        "response": {
+          "id": "chatcmpl-274d62a7-c3a3-4650-8d29-4e167bf53ee8",
+          "created": 1763088605,
+          "model": "qwen.qwen3-coder-480b-a35b-v1:0",
+          "object": "chat.completion",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "THOUGHT: The test cases confirm my understanding. Circles are expected to be provided as maps with \"coordinates\" and \"radius\" fields. The tests show:\n1. A valid circle with both fields should succeed\n2. An invalid circle with missing/incorrect coordinates should fail\n\nMy fix correctly addresses the issue by ensuring that both \"radius\" and \"coordinates\" are present in the map before returning success. Let me now create a comprehensive summary of what I've done:\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached\n```",
+                "role": "assistant",
+                "tool_calls": null,
+                "function_call": null
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 121,
+            "prompt_tokens": 10010,
+            "total_tokens": 10131,
+            "completion_tokens_details": null,
+            "prompt_tokens_details": {
+              "audio_tokens": null,
+              "cached_tokens": 0,
+              "text_tokens": null,
+              "image_tokens": null,
+              "cache_creation_tokens": 0
+            },
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "diff --git a/geo/parse.go b/geo/parse.go\nindex 7be0a06..9c93e01 100644\n--- a/geo/parse.go\n+++ b/geo/parse.go\n@@ -364,11 +364,13 @@ func ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n \t}\n \n \tif thingVal.Kind() == reflect.Map {\n+\t\tvar foundRadius, foundCoordinates bool\n \t\titer := thingVal.MapRange()\n \t\tfor iter.Next() {\n \n \t\t\tif iter.Key().String() == \"radius\" {\n \t\t\t\trv.Radius = iter.Value().Interface().(string)\n+\t\t\t\tfoundRadius = true\n \t\t\t\tcontinue\n \t\t\t}\n \n@@ -378,11 +380,16 @@ func ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n \t\t\t\t\treturn nil, false\n \t\t\t\t}\n \t\t\t\trv.Center = append(rv.Center, lng, lat)\n+\t\t\t\tfoundCoordinates = true\n \t\t\t}\n \t\t}\n+\t\t// Both radius and coordinates must be present\n+\t\tif foundRadius && foundCoordinates {\n+\t\t\treturn rv, true\n+\t\t}\n \t}\n \n-\treturn rv, true\n+\treturn nil, false\n }\n \n // ExtractGeoShapeCoordinates takes an interface{} and tries it's best to\ndiff --git a/geo/parse.go.bak b/geo/parse.go.bak\nnew file mode 100644\nindex 0000000..24d1015\n--- /dev/null\n+++ b/geo/parse.go.bak\n@@ -0,0 +1,479 @@\n+//  Copyright (c) 2017 Couchbase, Inc.\n+//\n+// Licensed under the Apache License, Version 2.0 (the \"License\");\n+// you may not use this file except in compliance with the License.\n+// You may obtain a copy of the License at\n+//\n+// \t\thttp://www.apache.org/licenses/LICENSE-2.0\n+//\n+// Unless required by applicable law or agreed to in writing, software\n+// distributed under the License is distributed on an \"AS IS\" BASIS,\n+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n+// See the License for the specific language governing permissions and\n+// limitations under the License.\n+\n+package geo\n+\n+import (\n+\t\"reflect\"\n+\t\"strconv\"\n+\t\"strings\"\n+\n+\t\"github.com/blevesearch/bleve/v2/util\"\n+\t\"github.com/blevesearch/geo/geojson\"\n+)\n+\n+// ExtractGeoPoint takes an arbitrary interface{} and tries it's best to\n+// interpret it is as geo point.  Supported formats:\n+// Container:\n+// slice length 2 (GeoJSON)\n+//\n+//\tfirst element lon, second element lat\n+//\n+// string (coordinates separated by comma, or a geohash)\n+//\n+//\tfirst element lat, second element lon\n+//\n+// map[string]interface{}\n+//\n+//\texact keys lat and lon or lng\n+//\n+// struct\n+//\n+//\tw/exported fields case-insensitive match on lat and lon or lng\n+//\n+// struct\n+//\n+//\tsatisfying Later and Loner or Lnger interfaces\n+//\n+// in all cases values must be some sort of numeric-like thing: int/uint/float\n+func ExtractGeoPoint(thing interface{}) (lon, lat float64, success bool) {\n+\tvar foundLon, foundLat bool\n+\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn lon, lat, false\n+\t}\n+\n+\tthingTyp := thingVal.Type()\n+\n+\t// is it a slice\n+\tif thingVal.Kind() == reflect.Slice {\n+\t\t// must be length 2\n+\t\tif thingVal.Len() == 2 {\n+\t\t\tfirst := thingVal.Index(0)\n+\t\t\tif first.CanInterface() {\n+\t\t\t\tfirstVal := first.Interface()\n+\t\t\t\tlon, foundLon = util.ExtractNumericValFloat64(firstVal)\n+\t\t\t}\n+\t\t\tsecond := thingVal.Index(1)\n+\t\t\tif second.CanInterface() {\n+\t\t\t\tsecondVal := second.Interface()\n+\t\t\t\tlat, foundLat = util.ExtractNumericValFloat64(secondVal)\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\t// is it a string\n+\tif thingVal.Kind() == reflect.String {\n+\t\tgeoStr := thingVal.Interface().(string)\n+\t\tif strings.Contains(geoStr, \",\") {\n+\t\t\t// geo point with coordinates split by comma\n+\t\t\tpoints := strings.Split(geoStr, \",\")\n+\t\t\tfor i, point := range points {\n+\t\t\t\t// trim any leading or trailing white spaces\n+\t\t\t\tpoints[i] = strings.TrimSpace(point)\n+\t\t\t}\n+\t\t\tif len(points) == 2 {\n+\t\t\t\tvar err error\n+\t\t\t\tlat, err = strconv.ParseFloat(points[0], 64)\n+\t\t\t\tif err == nil {\n+\t\t\t\t\tfoundLat = true\n+\t\t\t\t}\n+\t\t\t\tlon, err = strconv.ParseFloat(points[1], 64)\n+\t\t\t\tif err == nil {\n+\t\t\t\t\tfoundLon = true\n+\t\t\t\t}\n+\t\t\t}\n+\t\t} else {\n+\t\t\t// geohash\n+\t\t\tif len(geoStr) <= geoHashMaxLength {\n+\t\t\t\tlat, lon = DecodeGeoHash(geoStr)\n+\t\t\t\tfoundLat = true\n+\t\t\t\tfoundLon = true\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\t// is it a map\n+\tif l, ok := thing.(map[string]interface{}); ok {\n+\t\tif lval, ok := l[\"lon\"]; ok {\n+\t\t\tlon, foundLon = util.ExtractNumericValFloat64(lval)\n+\t\t} else if lval, ok := l[\"lng\"]; ok {\n+\t\t\tlon, foundLon = util.ExtractNumericValFloat64(lval)\n+\t\t}\n+\t\tif lval, ok := l[\"lat\"]; ok {\n+\t\t\tlat, foundLat = util.ExtractNumericValFloat64(lval)\n+\t\t}\n+\t}\n+\n+\t// now try reflection on struct fields\n+\tif thingVal.Kind() == reflect.Struct {\n+\t\tfor i := 0; i < thingVal.NumField(); i++ {\n+\t\t\tfieldName := thingTyp.Field(i).Name\n+\t\t\tif strings.HasPrefix(strings.ToLower(fieldName), \"lon\") {\n+\t\t\t\tif thingVal.Field(i).CanInterface() {\n+\t\t\t\t\tfieldVal := thingVal.Field(i).Interface()\n+\t\t\t\t\tlon, foundLon = util.ExtractNumericValFloat64(fieldVal)\n+\t\t\t\t}\n+\t\t\t}\n+\t\t\tif strings.HasPrefix(strings.ToLower(fieldName), \"lng\") {\n+\t\t\t\tif thingVal.Field(i).CanInterface() {\n+\t\t\t\t\tfieldVal := thingVal.Field(i).Interface()\n+\t\t\t\t\tlon, foundLon = util.ExtractNumericValFloat64(fieldVal)\n+\t\t\t\t}\n+\t\t\t}\n+\t\t\tif strings.HasPrefix(strings.ToLower(fieldName), \"lat\") {\n+\t\t\t\tif thingVal.Field(i).CanInterface() {\n+\t\t\t\t\tfieldVal := thingVal.Field(i).Interface()\n+\t\t\t\t\tlat, foundLat = util.ExtractNumericValFloat64(fieldVal)\n+\t\t\t\t}\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\t// last hope, some interfaces\n+\t// lon\n+\tif l, ok := thing.(loner); ok {\n+\t\tlon = l.Lon()\n+\t\tfoundLon = true\n+\t} else if l, ok := thing.(lnger); ok {\n+\t\tlon = l.Lng()\n+\t\tfoundLon = true\n+\t}\n+\t// lat\n+\tif l, ok := thing.(later); ok {\n+\t\tlat = l.Lat()\n+\t\tfoundLat = true\n+\t}\n+\n+\treturn lon, lat, foundLon && foundLat\n+}\n+\n+// various support interfaces which can be used to find lat/lon\n+type loner interface {\n+\tLon() float64\n+}\n+\n+type later interface {\n+\tLat() float64\n+}\n+\n+type lnger interface {\n+\tLng() float64\n+}\n+\n+// GlueBytes primarily for quicker filtering of docvalues\n+// during the filtering phase.\n+var GlueBytes = []byte(\"##\")\n+\n+var GlueBytesOffset = len(GlueBytes)\n+\n+func extractCoordinates(thing interface{}) []float64 {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil\n+\t}\n+\n+\tif thingVal.Kind() == reflect.Slice {\n+\t\t// must be length 2\n+\t\tif thingVal.Len() == 2 {\n+\t\t\tvar foundLon, foundLat bool\n+\t\t\tvar lon, lat float64\n+\t\t\tfirst := thingVal.Index(0)\n+\t\t\tif first.CanInterface() {\n+\t\t\t\tfirstVal := first.Interface()\n+\t\t\t\tlon, foundLon = util.ExtractNumericValFloat64(firstVal)\n+\t\t\t}\n+\t\t\tsecond := thingVal.Index(1)\n+\t\t\tif second.CanInterface() {\n+\t\t\t\tsecondVal := second.Interface()\n+\t\t\t\tlat, foundLat = util.ExtractNumericValFloat64(secondVal)\n+\t\t\t}\n+\n+\t\t\tif !foundLon || !foundLat {\n+\t\t\t\treturn nil\n+\t\t\t}\n+\n+\t\t\treturn []float64{lon, lat}\n+\t\t}\n+\t}\n+\treturn nil\n+}\n+\n+func extract2DCoordinates(thing interface{}) [][]float64 {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil\n+\t}\n+\n+\trv := make([][]float64, 0, 8)\n+\tif thingVal.Kind() == reflect.Slice {\n+\t\tfor j := 0; j < thingVal.Len(); j++ {\n+\t\t\tedges := thingVal.Index(j).Interface()\n+\t\t\tif es, ok := edges.([]interface{}); ok {\n+\t\t\t\tv := extractCoordinates(es)\n+\t\t\t\tif len(v) == 2 {\n+\t\t\t\t\trv = append(rv, v)\n+\t\t\t\t}\n+\t\t\t}\n+\t\t}\n+\n+\t\treturn rv\n+\t}\n+\n+\treturn nil\n+}\n+\n+func extract3DCoordinates(thing interface{}) (c [][][]float64) {\n+\tcoords := reflect.ValueOf(thing)\n+\tif !coords.IsValid() {\n+\t\treturn nil\n+\t}\n+\n+\tif coords.Kind() == reflect.Slice {\n+\t\tfor i := 0; i < coords.Len(); i++ {\n+\t\t\tvals := coords.Index(i)\n+\t\t\tedges := vals.Interface()\n+\t\t\tif es, ok := edges.([]interface{}); ok {\n+\t\t\t\tloop := extract2DCoordinates(es)\n+\t\t\t\tif len(loop) > 0 {\n+\t\t\t\t\tc = append(c, loop)\n+\t\t\t\t}\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\treturn c\n+}\n+\n+func extract4DCoordinates(thing interface{}) (rv [][][][]float64) {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil\n+\t}\n+\n+\tif thingVal.Kind() == reflect.Slice {\n+\t\tfor j := 0; j < thingVal.Len(); j++ {\n+\t\t\tc := extract3DCoordinates(thingVal.Index(j).Interface())\n+\t\t\trv = append(rv, c)\n+\t\t}\n+\t}\n+\n+\treturn rv\n+}\n+\n+func ParseGeoShapeField(thing interface{}) (interface{}, string, error) {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil, \"\", nil\n+\t}\n+\n+\tvar shape string\n+\tvar coordValue interface{}\n+\n+\tif thingVal.Kind() == reflect.Map {\n+\t\titer := thingVal.MapRange()\n+\t\tfor iter.Next() {\n+\t\t\tif iter.Key().String() == \"type\" {\n+\t\t\t\tshape = iter.Value().Interface().(string)\n+\t\t\t\tcontinue\n+\t\t\t}\n+\n+\t\t\tif iter.Key().String() == \"coordinates\" {\n+\t\t\t\tcoordValue = iter.Value().Interface()\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\treturn coordValue, strings.ToLower(shape), nil\n+}\n+\n+func extractGeoShape(thing interface{}) (*geojson.GeoShape, bool) {\n+\n+\tcoordValue, typ, err := ParseGeoShapeField(thing)\n+\tif err != nil {\n+\t\treturn nil, false\n+\t}\n+\n+\tif typ == CircleType {\n+\t\treturn ExtractCircle(thing)\n+\t}\n+\n+\treturn ExtractGeoShapeCoordinates(coordValue, typ)\n+}\n+\n+// ExtractGeometryCollection takes an interface{} and tries it's best to\n+// interpret all the member geojson shapes within it.\n+func ExtractGeometryCollection(thing interface{}) ([]*geojson.GeoShape, bool) {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil, false\n+\t}\n+\tvar rv []*geojson.GeoShape\n+\tvar f bool\n+\n+\tif thingVal.Kind() == reflect.Map {\n+\t\titer := thingVal.MapRange()\n+\t\tfor iter.Next() {\n+\n+\t\t\tif iter.Key().String() == \"type\" {\n+\t\t\t\tcontinue\n+\t\t\t}\n+\n+\t\t\tif iter.Key().String() == \"geometries\" {\n+\t\t\t\tcollection := iter.Value().Interface()\n+\t\t\t\titems := reflect.ValueOf(collection)\n+\n+\t\t\t\tfor j := 0; j < items.Len(); j++ {\n+\t\t\t\t\tshape, found := extractGeoShape(items.Index(j).Interface())\n+\t\t\t\t\tif found {\n+\t\t\t\t\t\tf = found\n+\t\t\t\t\t\trv = append(rv, shape)\n+\t\t\t\t\t}\n+\t\t\t\t}\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\treturn rv, f\n+}\n+\n+// ExtractCircle takes an interface{} and tries it's best to\n+// interpret the center point coordinates and the radius for a\n+// given circle shape.\n+func ExtractCircle(thing interface{}) (*geojson.GeoShape, bool) {\n+\tthingVal := reflect.ValueOf(thing)\n+\tif !thingVal.IsValid() {\n+\t\treturn nil, false\n+\t}\n+\n+\trv := &geojson.GeoShape{\n+\t\tType:   CircleType,\n+\t\tCenter: make([]float64, 0, 2),\n+\t}\n+\n+\tif thingVal.Kind() == reflect.Map {\n+\t\tvar foundRadius, foundCoordinates bool\n+\t\titer := thingVal.MapRange()\n+\t\tfor iter.Next() {\n+\n+\t\t\tif iter.Key().String() == \"radius\" {\n+\t\t\t\trv.Radius = iter.Value().Interface().(string)\n+\t\t\t\tfoundRadius = true\n+\t\t\t\tcontinue\n+\t\t\t}\n+\n+\t\t\tif iter.Key().String() == \"coordinates\" {\n+\t\t\t\tlng, lat, found := ExtractGeoPoint(iter.Value().Interface())\n+\t\t\t\tif !found {\n+\t\t\t\t\treturn nil, false\n+\t\t\t\t}\n+\t\t\t\trv.Center = append(rv.Center, lng, lat)\n+\t\t\t\tfoundCoordinates = true\n+\t\t\t}\n+\t\t}\n+\t\t// Both radius and coordinates must be present\n+\t\tif foundRadius && foundCoordinates {\n+\t\t\treturn rv, true\n+\t\t}\n+\t}\n+\n+\treturn nil, false\n+}\n+\t\t\treturn rv, true\n+\t\t}\n+\t}\n+\n+\treturn nil, false\n+}\n+}\n+\n+// ExtractGeoShapeCoordinates takes an interface{} and tries it's best to\n+// interpret the coordinates for any of the given geoshape typ like\n+// a point, multipoint, linestring, multilinestring, polygon, multipolygon,\n+func ExtractGeoShapeCoordinates(coordValue interface{},\n+\ttyp string) (*geojson.GeoShape, bool) {\n+\trv := &geojson.GeoShape{\n+\t\tType: typ,\n+\t}\n+\n+\tif typ == PointType {\n+\t\tpoint := extractCoordinates(coordValue)\n+\n+\t\t// ignore the contents with invalid entry.\n+\t\tif len(point) < 2 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\trv.Coordinates = [][][][]float64{{{point}}}\n+\t\treturn rv, true\n+\t}\n+\n+\tif typ == MultiPointType || typ == LineStringType ||\n+\t\ttyp == EnvelopeType {\n+\t\tcoords := extract2DCoordinates(coordValue)\n+\n+\t\t// ignore the contents with invalid entry.\n+\t\tif len(coords) == 0 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\tif typ == EnvelopeType && len(coords) != 2 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\tif typ == LineStringType && len(coords) < 2 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\trv.Coordinates = [][][][]float64{{coords}}\n+\t\treturn rv, true\n+\t}\n+\n+\tif typ == PolygonType || typ == MultiLineStringType {\n+\t\tcoords := extract3DCoordinates(coordValue)\n+\n+\t\t// ignore the contents with invalid entry.\n+\t\tif len(coords) == 0 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\tif typ == PolygonType && len(coords[0]) < 3 ||\n+\t\t\ttyp == MultiLineStringType && len(coords[0]) < 2 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\trv.Coordinates = [][][][]float64{coords}\n+\t\treturn rv, true\n+\t}\n+\n+\tif typ == MultiPolygonType {\n+\t\tcoords := extract4DCoordinates(coordValue)\n+\n+\t\t// ignore the contents with invalid entry.\n+\t\tif len(coords) == 0 || len(coords[0]) == 0 {\n+\t\t\treturn nil, false\n+\n+\t\t}\n+\n+\t\tif len(coords[0][0]) < 3 {\n+\t\t\treturn nil, false\n+\t\t}\n+\n+\t\trv.Coordinates = coords\n+\t\treturn rv, true\n+\t}\n+\n+\treturn rv, false\n+}\ndiff --git a/reproduce_issue.go b/reproduce_issue.go\nnew file mode 100644\nindex 0000000..f551ace\n--- /dev/null\n+++ b/reproduce_issue.go\n@@ -0,0 +1,24 @@\n+package main\n+\n+import (\n+    \"fmt\"\n+    \"github.com/blevesearch/bleve/v2/geo\"\n+)\n+\n+func main() {\n+    // Try to extract a circle from a map representation\n+    circleMap := map[string]interface{}{\n+        \"coordinates\": []float64{-122.4194, 37.7749}, // San Francisco coordinates\n+        \"radius\": \"1km\",\n+    }\n+    \n+    shape, found := geo.ExtractCircle(circleMap)\n+    if !found {\n+        fmt.Println(\"Failed to extract circle from map input\")\n+        return\n+    }\n+    \n+    fmt.Printf(\"Extracted circle: %+v\\n\", shape)\n+    fmt.Printf(\"Center: %v\\n\", shape.Center)\n+    fmt.Printf(\"Radius: %s\\n\", shape.Radius)\n+}\n"
+    }
+  ],
+  "trajectory_format": "mini-swe-agent-1",
+  "instance_id": "blevesearch__bleve.f2876b5e.func_pm_flip_operators__7ui6btdo"
+}
